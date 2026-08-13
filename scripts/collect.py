@@ -1131,7 +1131,9 @@ def _varre_segredos(root, limite=8):
     """
     rc, so, _ = run(["git", "ls-files"], cwd=root, timeout=60)
     if rc != 0:
-        return []
+        # `[]` aqui seria "varri o repositorio inteiro e esta limpo" — o
+        # achado P0 do relatorio. Sem git nao houve varredura nenhuma.
+        return None
     achados = []
     exts_ignoradas = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".ico", ".woff",
                       ".woff2", ".ttf", ".zip", ".gz", ".lock", ".svg", ".webp"}
@@ -1211,9 +1213,17 @@ def _branch_protection(root):
     out = {"disponivel": True, "repo": slug, "branch": branch,
            "visibility": info.get("visibility"), "protegido": False,
            "exige_review": None, "exige_checks": None}
-    rc, so, _ = run(["gh", "api", f"repos/{slug}/branches/{branch}/protection"], cwd=root)
+    rc, so, se = run(["gh", "api", f"repos/{slug}/branches/{branch}/protection"], cwd=root)
     if rc != 0:
-        return out  # 404 = sem protecao; e a resposta que interessa
+        # 404 e a resposta que INTERESSA: a branch nao tem protecao. Qualquer
+        # outra falha (403 sem permissao, rate limit, rede) nao autoriza dizer
+        # "desprotegida" — isso seria acusar sem ter olhado.
+        if re.search(r"404|not found", se or "", re.I):
+            return out
+        out["disponivel"] = False
+        out["motivo"] = _motivo(rc, se)
+        out["protegido"] = None
+        return out
     try:
         prot = json.loads(so)
     except json.JSONDecodeError:
@@ -1290,7 +1300,7 @@ def collect_governance(root, cfg):
         txt = gitignore.read_text(encoding="utf-8", errors="ignore")
         ignora_env = bool(re.search(r"^\s*\.env", txt, re.M))
 
-    return {
+    resultado = {
         "docs": docs,
         "gitignore": {"existe": gitignore.exists(), "ignora_env": ignora_env},
         "dependabot": (root / ".github" / "dependabot.yml").exists()
@@ -1304,6 +1314,10 @@ def collect_governance(root, cfg):
         "segredos_commitados": _varre_segredos(root),
         "dependencias": _deps_desatualizadas(root, cfg),
     }
+    if resultado["segredos_commitados"] is None:
+        nao_medido(resultado, "segredos_commitados",
+                   "git ls-files falhou — nenhum arquivo foi varrido")
+    return resultado
 
 
 # --------------------------------------------------------------------------

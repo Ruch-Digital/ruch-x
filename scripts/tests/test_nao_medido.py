@@ -8,6 +8,7 @@ nenhum relatorio.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -125,6 +126,65 @@ class TestGit(unittest.TestCase):
 
         self.assertEqual(out["hotspots"], [])
         self.assertNotIn("hotspots", out.get("nao_medido", {}))
+
+
+class TestSeguranca(unittest.TestCase):
+
+    def test_sem_git_nao_afirma_zero_segredos(self):
+        """O achado mais caro do relatorio nao pode nascer de um comando que falhou."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            gov = collect.collect_governance(root, {})
+        self.assertIsNone(gov["segredos_commitados"])
+        self.assertIn("segredos_commitados", gov.get("nao_medido", {}))
+
+    @staticmethod
+    def _fake_run_branch_protection(protection_rc, protection_se):
+        """Simula `gh repo view` (sempre sucesso) seguido de `gh api .../protection`
+        com o retorno dado. Mesmo padrao do TestGit: patch em collect.run,
+        distinguindo o comando pelo conteudo do argv."""
+        repo_view_json = json.dumps({
+            "defaultBranchRef": {"name": "main"},
+            "nameWithOwner": "org/repo",
+            "visibility": "PUBLIC",
+        })
+
+        def fake_run(cmd, *args, **kwargs):
+            if "repo" in cmd and "view" in cmd:
+                return 0, repo_view_json, ""
+            if "api" in cmd and "protection" in cmd[-1]:
+                return protection_rc, "", protection_se
+            raise AssertionError(f"comando inesperado em _branch_protection: {cmd}")
+
+        return fake_run
+
+    def test_404_e_a_unica_resposta_que_confirma_branch_desprotegida(self):
+        """404 quer dizer que a branch REALMENTE nao tem protecao."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(
+                     collect, "run",
+                     side_effect=self._fake_run_branch_protection(
+                         1, "gh: Not Found (HTTP 404)")):
+                out = collect._branch_protection(root)
+        self.assertTrue(out["disponivel"])
+        self.assertFalse(out["protegido"])
+        self.assertNotIn("motivo", out)
+
+    def test_403_rate_limit_nao_vira_branch_desprotegida(self):
+        """403/rate-limit != 'olhei e nao tem protecao' — vira nao-medido."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(
+                     collect, "run",
+                     side_effect=self._fake_run_branch_protection(
+                         1, "HTTP 403: API rate limit exceeded")):
+                out = collect._branch_protection(root)
+        self.assertFalse(out["disponivel"])
+        self.assertIsNone(out["protegido"])
+        self.assertTrue(out.get("motivo"))
 
 
 if __name__ == "__main__":
