@@ -177,6 +177,65 @@ class TestSiblingWorkflowsNaoMedido(unittest.TestCase):
         self.assertTrue(checklist["workflows com permissions declarado"])
 
 
+class TestGovernanceAusenteNaoReprova(unittest.TestCase):
+    """Fix round 2: o mesmo furo dos workflows, na direcao oposta.
+
+    README, decisoes, licenca e runbook sao lidos por EXISTENCIA de arquivo
+    (`bool(docs.get("readme"))`). Com o coletor `governance` fora do ar, `gov`
+    vira {} e a leitura responde "nao tem" — indistinguivel de arquivo
+    realmente ausente. O resultado era uma excecao no coletor virando 4
+    reprovacoes de um projeto que pode estar com tudo no lugar: acusacao sem
+    ter olhado, que e o pecado que a esteira inteira existe pra matar.
+    """
+
+    @staticmethod
+    def _por_prefixo(checados, prefixo):
+        return next(ok for rot, ok in checados if rot.startswith(prefixo))
+
+    def test_coletor_que_levantou_nao_reprova_README_licenca_adr_runbook(self):
+        sem_governance = _snap(errors={"governance": "boom: falha inesperada"})
+        eixos = {x["nome"]: x for x in render.auditoria(sem_governance)[0]}
+        processo = eixos["Processo"]["checados"]
+        for prefixo in ("README", "decisões documentadas", "licença"):
+            self.assertIsNone(self._por_prefixo(processo, prefixo),
+                              f"'{prefixo}' nao pode reprovar sem o coletor ter rodado")
+        self.assertIsNone(
+            self._por_prefixo(eixos["Confiabilidade"]["checados"], "runbook"),
+            "runbook nao pode reprovar sem o coletor ter rodado")
+
+        # Nenhum criterio do eixo foi medido -> nao ha letra. "F" aqui seria
+        # reprovacao inventada em cima de um coletor que nem rodou.
+        self.assertNotEqual(eixos["Processo"]["letra"], "F")
+        self.assertEqual(eixos["Processo"]["letra"], "NA")
+
+        # O motivo tem que chegar na tela junto do criterio.
+        rotulos = " ".join(r for r, _ in processo)
+        self.assertIn("não auditado", rotulos)
+        self.assertIn("boom: falha inesperada", rotulos)
+
+    def test_coletor_que_rodou_sem_README_continua_reprovando(self):
+        """Guard contra sobrecorrecao: arquivo REALMENTE ausente e achado.
+
+        Se o fix transformar toda leitura de arquivo em "nao auditado", o eixo
+        Processo para de reportar o que ele existe pra reportar.
+        """
+        com_governance = _snap(governance={
+            "docs": {"readme": None, "licenca": "LICENSE", "adr": None,
+                     "docs_dir": None, "runbooks": None},
+            "segredos_commitados": [], "workflows": {}, "dependencias": {},
+        })
+        eixos = {x["nome"]: x for x in render.auditoria(com_governance)[0]}
+        processo = eixos["Processo"]["checados"]
+        self.assertIs(self._por_prefixo(processo, "README"), False,
+                      "README ausente com coletor rodado e REPROVACAO, nao 'nao auditado'")
+        self.assertIs(self._por_prefixo(processo, "decisões documentadas"), False)
+        self.assertIs(self._por_prefixo(processo, "licença"), True)
+        self.assertIs(
+            self._por_prefixo(eixos["Confiabilidade"]["checados"], "runbook"), False)
+        # E o rotulo do criterio medido nao carrega sufixo de nao-auditado.
+        self.assertNotIn("não auditado", " ".join(r for r, _ in processo))
+
+
 # ----------------------------------------------------------------------
 # Fix round 1: achados da revisao externa (2 Critical, 3 Important, 2 Minor)
 # ----------------------------------------------------------------------

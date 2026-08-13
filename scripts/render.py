@@ -445,7 +445,24 @@ def auditoria(snap):
     # `gov`/`wf` sanitizados via `_seguro`: se "governance" (ou seu campo
     # "workflows") vier como string no snapshot, um `.get()` cru estourava
     # AttributeError — `_seguro` converte em {} ANTES do `.get()`.
-    gov = _seguro(snap.get("governance"), dict, {})
+    gov_raw = _seguro(snap.get("governance"), dict)
+    gov = gov_raw or {}
+    # Criterio que so existe dentro do `governance` (README, licenca, ADR,
+    # runbook) e lido por EXISTENCIA de arquivo: `bool(docs.get("readme"))`.
+    # Quando o coletor nao roda, `gov` vira {} e a leitura responde "nao tem" —
+    # que e a mesma resposta de um arquivo realmente ausente. Sem separar os
+    # dois, uma excecao no coletor virava 4 REPROVACOES no eixo Processo (e o
+    # runbook na Confiabilidade). E a mesma classe do credito falso de
+    # migrations, na direcao oposta: ali a falta de medicao premiava, aqui
+    # punia. `_do_gov` decide o `ok`; `gov_rotulo` diz o motivo na tela.
+    gov_erro = _seguro(snap.get("errors"), dict, {}).get("governance")
+    gov_rotulo = "" if gov_raw is not None else (
+        f" (não auditado: {gov_erro or 'coletor governance não rodou'})")
+
+    def _do_gov(valor):
+        """`None` (nao auditado) se o coletor nao rodou; senao `bool(valor)`."""
+        return None if gov_raw is None else bool(valor)
+
     # `seg` preserva o None de "nao medido" (`_seguro` com lista tambem cai
     # em None se o campo vier malformado — malformado converge com "nao
     # medido", nunca vira credito de seguranca de graca).
@@ -505,7 +522,7 @@ def auditoria(snap):
         (3, None if ci_ok is None else ci_ok >= 85, f"CI verde ({ci_ok}%)", "P1",
          f"Pipeline verde em apenas {ci_ok}% das execuções.",
          "Pipeline instável faz o time ignorar vermelho — estabilizar antes de adicionar teste novo."),
-        (3, bool(runbooks), "runbook de operação", "P1",
+        (3, _do_gov(runbooks), "runbook de operação" + gov_rotulo, "P1",
          "Sem runbooks: quando algo quebrar às 3h, a resposta está na cabeça de alguém.",
          "Escrever o passo a passo dos incidentes que já aconteceram — um arquivo por alerta."),
         (2, None if pend is None else len(pend) == 0,
@@ -525,13 +542,14 @@ def auditoria(snap):
         (4, protegido, "branch de produção protegida", "P1",
          f"A branch `{bp.get('branch', 'main')}` aceita push direto, sem revisão nem check obrigatório.",
          "Ligar proteção exigindo status check verde — é a única barreira que não depende de disciplina."),
-        (2, bool(docs.get("readme")), "README", "P2",
+        (2, _do_gov(docs.get("readme")), "README" + gov_rotulo, "P2",
          "Sem README: quem chega no repositório não sabe rodar o projeto.",
          "Descrever o que é, como rodar e como testar."),
-        (2, bool(docs.get("adr")) or bool(docs.get("docs_dir")), "decisões documentadas", "P2",
+        (2, _do_gov(docs.get("adr") or docs.get("docs_dir")),
+         "decisões documentadas" + gov_rotulo, "P2",
          "Sem registro de decisões técnicas (ADR ou pasta de docs).",
          "Registrar por que cada escolha estrutural foi feita — evita re-litigar decisão antiga."),
-        (1, bool(docs.get("licenca")), "licença", "P2",
+        (1, _do_gov(docs.get("licenca")), "licença" + gov_rotulo, "P2",
          "Sem arquivo de licença — em repositório privado é aceitável; público, não.",
          "Adicionar LICENSE se o código for distribuído."),
         (1, gov.get("pre_commit") or None, "hooks de pre-commit", "P2",

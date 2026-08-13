@@ -138,7 +138,7 @@ Source: Google SRE for the operational items.
 | Criterion | Weight | Met when | Not audited when |
 |---|---|---|---|
 | CI green | 3 | success rate ≥ 85 % | no GitHub Actions data |
-| Operational runbook | 3 | `docs/runbooks/`, `runbooks/` or `docs/deploy/runbooks/` contains any `.md` | — |
+| Operational runbook | 3 | `docs/runbooks/`, `runbooks/` or `docs/deploy/runbooks/` contains any `.md` | the `governance` collector raised — see the Process axis |
 | Migrations applied | 2 | no pending migration | `showmigrations` failed, the project has no `manage.py`, or the toml's `manage_py` does not resolve inside the root |
 | Observable infrastructure | 2 | container or database metrics were collected | nothing was collected — this criterion never fails, it only counts when present |
 
@@ -158,21 +158,25 @@ look like a project that simply is not Django.
 | Criterion | Weight | Met when | Not audited when |
 |---|---|---|---|
 | Production branch protected | 4 | the GitHub API reports branch protection | `gh` is absent, the repo has no GitHub remote, or the API call failed for any reason other than 404 |
-| README | 2 | `README.md`/`.rst`/`.txt` exists | — |
-| Documented decisions | 2 | `docs/adr/`, `docs/decisions/`, `adr/`, `docs/decisoes/` or `docs/` contains `.md` | — |
-| License | 1 | `LICENSE` (any common extension) exists | — |
+| README | 2 | `README.md`/`.rst`/`.txt` exists | the `governance` collector raised |
+| Documented decisions | 2 | `docs/adr/`, `docs/decisions/`, `adr/`, `docs/decisoes/` or `docs/` contains `.md` | idem |
+| License | 1 | `LICENSE` (any common extension) exists | idem |
 | Pre-commit hooks | 1 | `.pre-commit-config.yaml` exists | absent — counts as not audited, never as a failure |
 | Changelog | 2 | `CHANGELOG.md` or `docs/CHANGELOG.md` exists | absent — same |
 
 Branch protection is the heaviest single criterion of the axis because it is the
 only one that does not depend on anyone's discipline.
 
-**The file-existence criteria have no "not audited" state of their own.** README,
-documented decisions, license and the operational runbook read a field of the
-`governance` collector, and a missing field is indistinguishable from a missing
-file. If the whole collector raised — its error is listed in the dashboard's
-findings — those criteria report as *not met* rather than *not audited*. Check
-`errors.governance` before taking "no README" at face value.
+**The file-existence criteria separate "the file is missing" from "nobody
+looked."** README, documented decisions, license and the operational runbook are
+read out of the `governance` collector, where a missing field looks exactly like
+a missing file. The grade therefore checks the collector first: when `governance`
+is absent from the snapshot — it raised, and the error is in `errors.governance`
+— those four report as *não auditado*, carry that error as the reason on the
+card, and leave the denominator. When the collector ran, an absent file is a
+finding, as it should be. Without the distinction, one exception in a collector
+produced four accusations ("no README", "no license", "no documented decisions",
+"no runbooks") about a project nobody had looked at.
 
 A **404** from the protection endpoint is the answer that matters: the branch has
 no protection. Any other failure — 403, rate limit, network — leaves the

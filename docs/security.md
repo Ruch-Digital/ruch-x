@@ -112,7 +112,7 @@ Fields that carry text from outside the tool:
 | Field | Source |
 |---|---|
 | `errors.<collector>` | `str(exception)` from the failing collector (300 chars) — a bad DSN lands here |
-| `<collector>.nao_medido.<field>` | last line of the failed command's stderr (200 chars) |
+| `<collector>.nao_medido.<field>` | last line of the failed command's stderr (200 chars) — which routinely includes **absolute paths from the auditing machine**, e.g. `/Users/you/projects/venv/bin/python3: No module named radon` |
 | `db.slow_queries[].query` | first 160 chars of query text from `pg_stat_statements` |
 | `db.<query>.unavailable` | PostgreSQL error text |
 | `django.deploy_issues[].message`, `django.other_issues[].message` | `check --deploy` output (200 chars) |
@@ -154,6 +154,12 @@ only `{"file": ..., "line": ..., "kind": ...}` — path, line number, and a labe
 such as `token do GitHub`. The matched text is used for the plausibility filter
 and then discarded. A finding tells you where to look; it does not republish the
 credential into a file you are about to commit.
+
+**Redaction covers credentials, not privacy.** Local filesystem paths, machine
+names, branch names, commit subjects and package names pass through untouched —
+they are diagnostic, and there is no pattern that could separate a sensitive one
+from a useful one. Read a snapshot once before you commit the first one,
+especially in a public repository.
 
 Redaction is a safety net, not a licence. A collector that has a secret in hand
 should not put it in the snapshot in the first place.
@@ -201,6 +207,14 @@ no `manage.py`, and a `manage_py` in the toml that does not resolve), the secret
 scan, git metrics, hotspots, line counts (both `scc` and `cloc`) and complexity.
 Branch protection follows the same contract through a different shape: the
 collector reports `disponivel: false` with a `motivo`, and `protegido: null`.
+
+A collector that raises never reaches the snapshot at all — its error goes to
+`errors.<collector>`. The grade treats that as "not measured" too, which matters
+most for the criteria read out of `governance` by file existence (README,
+license, documented decisions, runbooks): a missing field there is
+indistinguishable from a missing file, so the absence of the collector is
+checked before the absence of the file. An exception must not turn into four
+accusations about a repository nobody looked at.
 
 In the dashboard the criterion is shown as *não auditado* with its reason, and
 it is removed from the denominator of the axis grade — it neither rewards nor

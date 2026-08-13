@@ -100,7 +100,7 @@ GRANT CONNECT ON DATABASE mydb TO ruchx;
 ```
 
 ```bash
-export RUCHX_DATABASE_URL="postgresql://ruchx:senha@host:5432/mydb"
+export RUCHX_DATABASE_URL="postgresql://ruchx:<password>@host:5432/mydb"
 ```
 
 Schema-per-tenant setups can pin a schema with

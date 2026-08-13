@@ -145,7 +145,7 @@ variable, and from a **read-only** user — the queries only touch catalogue and
 statistics (`pg_stat_*`, `pg_settings`), never a business table:
 
 ```bash
-export RUCHX_DATABASE_URL="postgresql://reader:password@host:5432/db"
+export RUCHX_DATABASE_URL="postgresql://reader:<password>@host:5432/db"
 ```
 
 ## Security
