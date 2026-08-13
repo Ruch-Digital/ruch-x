@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import sys
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -28,21 +29,42 @@ SNAPSHOT_DIR_LEGADO = ".metricas"
 # --------------------------------------------------------------------------
 
 def load_snapshots(dirpath):
-    """Todos os snapshots ordenados do mais antigo pro mais novo."""
+    """Todos os snapshots ordenados do mais antigo pro mais novo.
+
+    Snapshot e arquivo versionado — pode ter vindo de outra pessoa, de outra
+    versao da ferramenta ou de um editor. Arquivo com forma errada e pulado
+    com aviso; derrubar o render com traceback nao ajuda ninguem.
+    """
     snaps = []
     for f in sorted(Path(dirpath).glob("*.json")):
         if f.name == "latest.json":
             continue
         try:
-            snaps.append(json.loads(f.read_text(encoding="utf-8")))
-        except json.JSONDecodeError:
+            dado = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
             continue
-    snaps.sort(key=lambda s: s.get("generated_at", ""))
+        if not isinstance(dado, dict):
+            print(f"aviso: {f.name} ignorado (nao e um objeto JSON)", file=sys.stderr)
+            continue
+        snaps.append(dado)
+    snaps.sort(key=lambda s: str(s.get("generated_at") or ""))
     return snaps
 
 
 def e(x):
     return html.escape(str(x if x is not None else "—"))
+
+
+def num(v, sufixo=""):
+    """Valor que o painel trata como numero.
+
+    O snapshot pode ter sido escrito por outra pessoa (ele e versionado e
+    viaja junto do repositorio). Interpolar cru o que se supoe numero foi a
+    unica via de XSS do dashboard: em JSON forjado esses campos sao string.
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return e(v)
+    return f"{v}{sufixo}"
 
 
 def human_bytes(n):
@@ -219,6 +241,17 @@ def pluralize_label(snap):
             "Pasta": "Pastas"}.get(base, base + "s")
 
 
+def _nao_medido(snap, coletor, campo):
+    """Sufixo do rotulo quando o criterio nao pode ser medido.
+
+    Criterio nao auditado ja sai do denominador da nota (`eixo()` so soma os
+    itens com ok is not None). O que faltava era a tela DIZER isso — sem o
+    motivo, o leitor supoe que passou.
+    """
+    motivo = dig(snap, coletor, "nao_medido", campo)
+    return f" (não auditado: {motivo})" if motivo else ""
+
+
 # --------------------------------------------------------------------------
 # auditoria: 5 eixos com nota, evidencia e o que fazer
 # --------------------------------------------------------------------------
@@ -296,6 +329,7 @@ def auditoria(snap):
 
     # ---------------- Qualidade ----------------
     cov = dig(snap, "tests", "coverage_pct")
+    cov_idade = dig(snap, "tests", "coverage_age_days")
     cx = dig(snap, "quality", "complexity", "above_10")
     blocos = dig(snap, "quality", "complexity", "blocks_analyzed") or 0
     pct_cx = (100 * cx / blocos) if (cx is not None and blocos) else None
@@ -305,7 +339,9 @@ def auditoria(snap):
         # Cobertura ausente e ACHADO, nao "nao se aplica": nao medir e uma
         # escolha com consequencia — ninguem sabe o que a suite protege.
         (4, cov >= 70 if cov is not None else False,
-         f"cobertura ({cov}%)" if cov is not None else "cobertura (não medida)", "P1",
+         f"cobertura ({cov}%)" + (f" — relatório de {cov_idade} dias atrás"
+                                  if isinstance(cov_idade, int) and cov_idade > 14 else "")
+         if cov is not None else "cobertura (não medida)", "P1",
          "Cobertura de testes não é medida — não há como saber o que a suíte protege."
          if cov is None else f"Cobertura em {cov}%.",
          "Rodar a suíte com relatório de cobertura e versionar o resultado a cada coleta."),
@@ -320,23 +356,30 @@ def auditoria(snap):
 
     # ---------------- Segurança ----------------
     gov = snap.get("governance") or {}
-    seg = gov.get("segredos_commitados") or []
-    wf = gov.get("workflows") or {}
+    seg = gov.get("segredos_commitados")
+    # `wf_raw` preserva o None de "governance inteiro nao rodou" (o unico jeito
+    # de wf ser None — o coletor individual sempre devolve dict, mesmo vazio).
+    # `wf` (com `or {}`) e so pra leitura de texto/contagem, nunca pra decidir
+    # ok — senao a falta de medicao vira "actions com pin" de graca, o mesmo
+    # efeito que o achado parqueado tinha em segredos_commitados.
+    wf_raw = gov.get("workflows")
+    wf = wf_raw or {}
     deps = gov.get("dependencias") or {}
     desatual = deps.get("desatualizadas")
     total_deps = deps.get("total")
     pct_velhas = (100 * desatual / total_deps) if (desatual is not None and total_deps) else None
-    sec_django = dig(snap, "django", "deploy_issues") or []
+    sec_django = dig(snap, "django", "deploy_issues")
     eixo("Segurança", [
-        (5, len(seg) == 0, "nenhum segredo commitado", "P0",
-         f"{len(seg)} possível(is) segredo(s) em arquivo versionado: "
-         f"{', '.join(s['file'] for s in seg[:3])}.",
+        (5, None if seg is None else len(seg) == 0,
+         "nenhum segredo commitado" + _nao_medido(snap, "governance", "segredos_commitados"), "P0",
+         f"{len(seg or [])} possível(is) segredo(s) em arquivo versionado: "
+         f"{', '.join(s['file'] for s in (seg or [])[:3])}.",
          "Revogar a credencial (o histórico do git guarda para sempre) e mover para variável de ambiente."),
-        (3, not wf.get("sem_pin"), "actions com versão fixada", "P1",
+        (3, None if wf_raw is None else not wf.get("sem_pin"), "actions com versão fixada", "P1",
          f"{len(wf.get('sem_pin') or [])} action(s) referenciada(s) por tag móvel "
          f"(ex: {(wf.get('sem_pin') or ['—'])[0]}).",
          "Fixar no SHA do commit: tag pode ser reapontada e roda código novo dentro do seu CI, com seus secrets."),
-        (2, not wf.get("sem_permissions"), "workflows com permissions declarado", "P2",
+        (2, None if wf_raw is None else not wf.get("sem_permissions"), "workflows com permissions declarado", "P2",
          f"{len(wf.get('sem_permissions') or [])} workflow(s) sem bloco `permissions` — herdam token amplo.",
          "Declarar `permissions:` com o mínimo necessário em cada workflow."),
         (2, None if pct_velhas is None else pct_velhas < 25, f"dependências atualizadas ({desatual}/{total_deps})", "P2",
@@ -349,18 +392,20 @@ def auditoria(snap):
         # DEBUG=True e falta de HSTS sao o esperado ali. Sem `[django]
         # settings_module` apontando producao, o criterio sai como "não
         # auditado" em vez de reprovar um sistema que pode estar correto.
-        (3, (len(sec_django) == 0) if dig(snap, "django", "ambiente_de_producao") else None,
+        (3, None if (sec_django is None or not dig(snap, "django", "ambiente_de_producao"))
+            else len(sec_django) == 0,
          "avisos de segurança do framework"
-         + ("" if dig(snap, "django", "ambiente_de_producao") else " (não auditado: settings de dev)"), "P1",
-         f"{len(sec_django)} aviso(s) de segurança no check de deploy "
+         + (_nao_medido(snap, "django", "deploy_issues")
+            or ("" if dig(snap, "django", "ambiente_de_producao") else " (não auditado: settings de dev)")), "P1",
+         f"{len(sec_django or [])} aviso(s) de segurança no check de deploy "
          f"(settings: {dig(snap, 'django', 'settings_module') or 'do ambiente'}).",
          "Revisar HSTS, cookies seguros e redirect de SSL nos settings de produção."),
-    ], f"{len(seg)} segredo(s) · {len(wf.get('sem_pin') or [])} action(s) sem pin")
+    ], f"{len(seg or [])} segredo(s) · {len(wf.get('sem_pin') or [])} action(s) sem pin")
 
     # ---------------- Confiabilidade ----------------
     tem_alerta = bool(dig(snap, "infra", "containers")) or bool(snap.get("db"))
     runbooks = dig(snap, "governance", "docs", "runbooks")
-    pend = dig(snap, "django", "pending_migrations") or []
+    pend = dig(snap, "django", "pending_migrations")
     ci_ok = dig(snap, "ci", "success_rate")
     eixo("Confiabilidade", [
         (3, None if ci_ok is None else ci_ok >= 85, f"CI verde ({ci_ok}%)", "P1",
@@ -369,8 +414,9 @@ def auditoria(snap):
         (3, bool(runbooks), "runbook de operação", "P1",
          "Sem runbooks: quando algo quebrar às 3h, a resposta está na cabeça de alguém.",
          "Escrever o passo a passo dos incidentes que já aconteceram — um arquivo por alerta."),
-        (2, len(pend) == 0, "migrations aplicadas", "P2",
-         f"{len(pend)} migration(s) pendente(s) no ambiente medido.",
+        (2, None if pend is None else len(pend) == 0,
+         "migrations aplicadas" + _nao_medido(snap, "django", "pending_migrations"), "P2",
+         f"{len(pend or [])} migration(s) pendente(s) no ambiente medido.",
          "Aplicar ou confirmar que o alvo da medição é o ambiente certo."),
         (2, tem_alerta or None, "infraestrutura observável", "P2",
          "Nenhuma métrica de runtime coletada (containers/banco).",
@@ -567,8 +613,8 @@ def build_signals(snap, snaps):
     models = dig(snap, "django", "models")
     napps = dig(snap, "django", "apps")
     if models:
-        cards.append(stat("Models", models,
-                          sub=f"em {napps} apps" if napps else "",
+        cards.append(stat("Models", num(models),
+                          sub=f"em {num(napps)} apps" if napps else "",
                           spark=sparkline(series(snaps, lambda s: dig(s, "django", "models")))))
     else:
         mods = dig(snap, "code", "by_app") or []
@@ -583,13 +629,13 @@ def build_signals(snap, snaps):
     size_b = size[0]["bytes"] if isinstance(size, list) and size else None
     chr_ = dig(snap, "db", "cache_hit_ratio")
     cards.append(stat("Banco", human_bytes(size_b),
-                      sub=f"cache hit {chr_}%" if chr_ else "",
+                      sub=f"cache hit {num(chr_)}%" if chr_ else "",
                       spark=sparkline(series(
                           snaps, lambda s: (dig(s, "db", "size") or [{}])[0].get("bytes")))))
 
     commits = dig(snap, "git", "commits_30d")
     nautores = len(dig(snap, "git", "authors_30d") or [])
-    cards.append(stat("Commits (30d)", commits if commits is not None else "—",
+    cards.append(stat("Commits (30d)", num(commits) if commits is not None else "—",
                       sub=("1 pessoa" if nautores == 1 else f"{nautores} pessoas") if nautores else "",
                       spark=sparkline(series(snaps, lambda s: dig(s, "git", "commits_30d")))))
 
@@ -647,7 +693,7 @@ def build_db(snap):
     unused = db.get("unused_indexes")
     if isinstance(unused, list):
         rows = [[f'<code>{e(u["index"])}</code>', f'<code class="dim">{e(u["table"])}</code>',
-                 human_bytes(u.get("bytes")), f'<span class="num">{u.get("idx_scan")}</span>']
+                 human_bytes(u.get("bytes")), f'<span class="num">{num(u.get("idx_scan"))}</span>']
                 for u in unused]
         blocks.append("<h3>Índices ociosos</h3>"
                       '<p class="note">Índice pouco lido continua sendo escrito em todo INSERT e UPDATE.</p>'
@@ -658,8 +704,8 @@ def build_db(snap):
     if isinstance(slow, list) and slow:
         rows = [[f'<code class="sql">{e(q.get("query"))}</code>',
                  f'<span class="num">{(q.get("calls") or 0):,}</span>'.replace(",", "."),
-                 f'<span class="num">{q.get("mean_ms")} ms</span>',
-                 f'<span class="num">{q.get("total_s")} s</span>']
+                 f'<span class="num">{num(q.get("mean_ms"), " ms")}</span>',
+                 f'<span class="num">{num(q.get("total_s"), " s")}</span>']
                 for q in slow]
         blocks.append("<h3>Queries por tempo total</h3>" + table(
             ["Query", "Chamadas", "Média", "Total"], rows))
@@ -705,8 +751,8 @@ def build_quality(snap):
     worst = dig(snap, "quality", "complexity", "worst") or []
     if worst:
         rows = [[f'<code>{e(b["file"])}</code>', f'<code class="dim">{e(b["name"])}</code>',
-                 f'<span class="num tag {"bad" if b["complexity"] > 15 else "warn"}">{b["complexity"]}</span>',
-                 f'<span class="num dim">linha {b.get("line")}</span>']
+                 f'<span class="num tag {"bad" if b["complexity"] > 15 else "warn"}">{num(b["complexity"])}</span>',
+                 f'<span class="num dim">linha {num(b.get("line"))}</span>']
                 for b in worst[:12]]
         blocks.append("<h3>Funções mais complexas</h3>" + table(
             ["Arquivo", "Função", "Complexidade", ""], rows))
@@ -881,7 +927,7 @@ def render(snaps):
     ]
     age = dig(snap, "git", "age_days")
     if age:
-        meta.append(f'<span>repo com <b>{age}</b> dias</span>')
+        meta.append(f'<span>repo com <b>{num(age)}</b> dias</span>')
     stack = dig(snap, "stack", "detected") or []
     if stack:
         meta.append(f'<span>stack <b>{e(" · ".join(stack[:4]))}</b></span>')
@@ -949,6 +995,11 @@ def main():
         raise SystemExit(f"nenhum snapshot em {dirpath}/ — rode collect.py primeiro")
 
     out = Path(args.out or Path(dirpath) / "dashboard.html")
+    # git versiona symlink de diretorio: um `.ruch-x -> ../alvo` no repositorio
+    # faria o dashboard ser escrito fora dele (e `--open` abriria esse).
+    if not args.out and Path(dirpath).is_symlink():
+        raise SystemExit(f"{dirpath} e um symlink — recusando escrever fora do "
+                         f"repositorio. Use --out para escolher o destino.")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render(snaps), encoding="utf-8")
     print(str(out.resolve()))
