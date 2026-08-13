@@ -8,10 +8,13 @@ nenhum relatorio.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from _fake_repo import MANAGE_QUE_EXPLODE, MANAGE_QUE_MEDE, fake_repo
 
@@ -59,6 +62,7 @@ class TestCheckDjango(unittest.TestCase):
         self.assertEqual(out["pending_migrations"], ["app.0002_novo"])
 
 
+@unittest.skipUnless(shutil.which("git"), "git ausente")
 class TestGit(unittest.TestCase):
 
     def test_diretorio_sem_git_nao_reporta_zero_commits(self):
@@ -71,6 +75,56 @@ class TestGit(unittest.TestCase):
         self.assertIsNone(out["authors_30d"])
         self.assertIsNone(out["hotspots"])
         self.assertIn("commits_30d", out.get("nao_medido", {}))
+
+    @staticmethod
+    def _repo_git_real(tmp, **arquivos):
+        """fake_repo() + git init/commit de verdade, pra passar do rev-parse
+        e chegar em hotspots() — a "segunda porta" do contrato."""
+        root = fake_repo(tmp, **arquivos)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+            cwd=root, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "inicial"],
+            cwd=root, check=True, capture_output=True,
+        )
+        return root
+
+    def test_git_log_que_falha_marca_hotspots_nao_medido(self):
+        """A "segunda porta": rev-parse passa, mas o `git log` do hotspots falha.
+
+        Sem este teste, um refactor futuro pode trocar o `return None` de
+        dentro de hotspots() por `return []` sem quebrar suite nenhuma.
+        """
+        original_run = collect.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if "log" in cmd and "--name-only" in cmd:
+                return 128, "", "fatal: bad object"
+            return original_run(cmd, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo_git_real(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "run", side_effect=fake_run):
+                out = collect.collect_git(root, {})
+
+        self.assertIsNone(out["hotspots"])
+        self.assertIn("hotspots", out.get("nao_medido", {}))
+        # so a porta do hotspots foi afetada — o resto do coletor segue medindo.
+        self.assertIsInstance(out["commits_30d"], int)
+
+    def test_churn_vazio_de_verdade_continua_lista_vazia(self):
+        """Repo real, sem nenhum arquivo de SOURCE_EXTS commitado: `[]` e
+        medicao valida, nao ausencia de medicao."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo_git_real(tmp, **{"README.md": "so documentacao\n"})
+            out = collect.collect_git(root, {})
+
+        self.assertEqual(out["hotspots"], [])
+        self.assertNotIn("hotspots", out.get("nao_medido", {}))
 
 
 if __name__ == "__main__":
