@@ -1,15 +1,52 @@
 ---
 name: ruch-x
-description: "Ruch-X é o raio-x de um repositório: coleta métricas de saúde de um projeto em qualquer linguagem (linhas de código, cobertura de testes, complexidade, migrations, tamanho e índices do banco Postgres, containers Docker em Coolify/Easypanel/VPS, CI do GitHub Actions) e gera um dashboard HTML offline com histórico e mapa de atrito. Use sempre que o usuário pedir métricas, indicadores, analytics, dashboard, \"como está o projeto\", saúde do código, débito técnico, cobertura de testes, onde refatorar, ou quiser comparar o estado atual com semanas anteriores — mesmo que ele não use a palavra \"dashboard\". Também use quando pedirem auditoria, raio-x, diagnóstico ou \"tirar uma chapa\" de um repositório, relatório de status técnico pra sócio ou cliente, ou quando perguntarem o que medir num projeto. Use igualmente quando pedirem o Ruch-X pelo nome, ou falarem em \"rodar o raio-x\" de um sistema."
+description: "Ruch-X é o raio-x e o auditor de engenharia de um repositório, em qualquer linguagem: dá nota (A-F) em cinco eixos — Entrega (métricas DORA: frequência de deploy, lead time, taxa de falha, tempo de recuperação), Qualidade (cobertura, complexidade, mapa de atrito), Segurança (segredo commitado, actions sem pin, dependências desatualizadas, supply chain), Confiabilidade (CI, runbooks, migrations, observabilidade) e Processo (branch protegida, docs, ADR) — e devolve um plano de ação priorizado (P0/P1/P2) num dashboard HTML offline com histórico. Use sempre que o usuário pedir métricas, indicadores, analytics, dashboard, \"como está o projeto\", saúde do código, débito técnico, cobertura de testes, onde refatorar, ou quiser comparar o estado atual com semanas anteriores — mesmo que ele não use a palavra \"dashboard\". Use também quando pedirem auditoria técnica, raio-x, diagnóstico, due diligence, \"tirar uma chapa\" de um repositório, avaliação de maturidade ou boas práticas, o que falta pro projeto estar no padrão do mercado, relatório de status técnico pra sócio ou cliente, métricas DORA, ou quando perguntarem o que medir num projeto. Use igualmente quando pedirem o Ruch-X pelo nome, ou falarem em \"rodar o raio-x\" de um sistema."
 ---
 
 # Ruch-X
 
-O raio-x de um repositório. Gera um retrato da saúde do projeto e o transforma num dashboard HTML
-que abre offline, com comparação contra as coletas anteriores.
+O raio-x de um repositório: **auditoria de engenharia com veredito**, entregue como um dashboard
+HTML que abre offline e compara com as coletas anteriores.
 
-O objetivo não é encher a tela de número. É responder três perguntas:
-**o que mudou desde a última vez**, **onde dói mais agora**, e **o que fazer a respeito**.
+Ele responde o que um cliente paga pra ouvir — *"vocês entregam rápido e com segurança?"*,
+*"o que acontece quando quebra?"*, *"dá pra manter esse código no ano que vem?"* — e diz, com
+evidência, o que está fora do padrão da engenharia atual e o que fazer a respeito.
+
+## O veredito
+
+Cinco eixos, cada um com nota (A–F) e plano de ação priorizado. Os critérios seguem as referências
+correntes: **DORA** (Accelerate / State of DevOps) para entrega, **OWASP** e **SLSA** para supply
+chain, **Google SRE** para confiabilidade.
+
+| Eixo | O que audita |
+|---|---|
+| **Entrega** | as 4 métricas DORA: frequência de deploy, lead time do commit até produção, taxa de falha de mudança, tempo de recuperação |
+| **Qualidade** | cobertura, complexidade e o arquivo de maior atrito |
+| **Segurança** | segredo commitado, action sem pin, `permissions` no workflow, dependência velha, atualização automática, avisos do framework |
+| **Confiabilidade** | CI verde, runbook de operação, migrations aplicadas, infraestrutura observável |
+| **Processo** | branch protegida, README, decisões documentadas, licença, pre-commit, changelog |
+
+Cada desconto de nota vira uma linha do plano com **prioridade (P0/P1/P2)**, o que está errado e
+**como corrigir** — nota sem caminho é só nota baixa.
+
+Os limiares vivem em `auditoria()` no `render.py`, explícitos de propósito: numa auditoria o
+cliente pode discutir o critério, não receber veredito de caixa-preta.
+
+O resto do painel segue respondendo as três perguntas de sempre: **o que mudou desde a última
+vez**, **onde dói mais agora**, e **o que fazer a respeito**.
+
+## Como apresentar o veredito
+
+Não leia os cinco eixos em voz alta — eles estão na tela. Diga **a nota mais baixa, por que ela é
+baixa e qual a primeira coisa a fazer**. Se houver P0, ele vem antes de tudo: P0 é segredo
+commitado ou equivalente, e não espera a próxima sprint.
+
+Duas armadilhas que corroem a confiança no relatório:
+
+- **Falso positivo mata auditoria.** Antes de afirmar "vocês têm segredo no repositório", abra o
+  arquivo. O coletor já filtra fixture e placeholder, mas a palavra final é sua.
+- **Nota baixa não é bronca.** "Sem cobertura medida" quer dizer que ninguém sabe o que a suíte
+  protege — não que o time é ruim. O tom é de quem mostra o caminho, não de quem dá nota na prova.
 
 ## Primeira vez neste projeto: conduza o passo a passo
 
@@ -89,6 +126,7 @@ ausência apaga uma parte do painel:
 | `psycopg[binary]` | seção inteira de banco | `pip install "psycopg[binary]"` |
 | `gh` | seção de CI | `gh auth login` depois de instalar |
 | `docker` | seção de infraestrutura | já existe se o projeto usa Docker |
+| `gh` autenticado | **eixos Entrega e Processo** (DORA, branch protection) | `gh auth login` |
 
 Sem nenhuma delas o script ainda roda — cai num contador de linhas próprio e
 numa aproximação de complexidade por contagem de ramificações. Diga isso em vez

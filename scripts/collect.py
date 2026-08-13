@@ -27,11 +27,11 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: coletores governance e dora (auditoria de engenharia)
 SNAPSHOT_DIR = ".ruch-x"
 SNAPSHOT_DIR_LEGADO = ".metricas"
 COLLECTORS = ["stack", "code", "quality", "tests", "django", "git", "db",
-              "infra", "ci"]
+              "infra", "ci", "governance", "dora"]
 
 
 # --------------------------------------------------------------------------
@@ -986,10 +986,375 @@ def collect_ci(root, cfg):
 # orquestracao
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# governance: o que um auditor olha antes de olhar codigo
+# --------------------------------------------------------------------------
+
+# Padroes de segredo commitado. Deliberadamente conservadores: um falso
+# positivo custa a confianca do relatorio inteiro.
+SECRET_PATTERNS = [
+    ("AWS access key", r"\bAKIA[0-9A-Z]{16}\b"),
+    ("chave privada", r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"),
+    ("token do GitHub", r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"),
+    ("token do Slack", r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+    ("chave da OpenAI", r"\bsk-[A-Za-z0-9]{32,}\b"),
+    ("chave da Anthropic", r"\bsk-ant-[A-Za-z0-9_-]{32,}\b"),
+    ("DSN com senha", r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s:@/]+:[^\s:@/]{6,}@"),
+    ("senha em atribuicao", r"(?i)\b(?:password|senha|secret_key|api_key)\s*[=:]\s*[\"'][^\"'\s${}]{16,}[\"']"),
+]
+
+# Valor que casa com isso e senha de teste, nao segredo. Sem esta lista o
+# relatorio acusa `password="testpass123"` de suite e perde a credibilidade —
+# e um alarme falso num relatorio de auditoria contamina todos os outros
+# achados (visto no 1o uso real, 2026-08-12: 8 de 8 "segredos" eram fixture).
+VALORES_DE_TESTE = re.compile(
+    r"(?i)(test|senha|password|dummy|exemplo|example|changeme|placeholder|"
+    r"fake|mock|sample|foobar|123456|xxx+|secret)"
+)
+
+
+def _segredo_plausivel(rotulo, trecho, texto, pos):
+    """Segundo filtro: o match parece segredo DE VERDADE?
+
+    Doc tecnica fala sobre segredo o tempo todo — "salve o `-----BEGIN PRIVATE
+    KEY-----`", `postgres://user:<senha>@host`. Sem esta checagem o relatorio
+    acusa a propria documentacao de vazar credencial (visto no 1o uso real).
+    """
+    # Placeholder explicito em qualquer achado: <senha>, ${VAR}, ***, xxx
+    if re.search(r"[<>${}]|\*{3,}|x{4,}", trecho, re.I):
+        return False
+    if rotulo == "senha em atribuicao":
+        return not VALORES_DE_TESTE.search(trecho)
+    if rotulo == "chave privada":
+        # Chave real tem corpo base64 logo abaixo do cabecalho; mencao em doc
+        # vem sozinha na linha, entre crases ou aspas.
+        corpo = texto[pos:pos + 400].splitlines()[1:4]
+        return any(re.fullmatch(r"[A-Za-z0-9+/=]{40,}", ln.strip()) for ln in corpo)
+    return True
+
+
+def _e_arquivo_de_teste(rel_path):
+    p = rel_path.lower().replace("\\", "/")
+    return (
+        "/tests/" in p or p.startswith("tests/")
+        or re.search(r"(^|/)(test_|tests_|conftest)", p) is not None
+        or re.search(r"(_test|\.test|\.spec)\.[a-z]+$", p) is not None
+        or "/fixtures/" in p or "factories" in p
+    )
+
+DOCS_ESPERADOS = {
+    "readme": ["README.md", "README.rst", "README.txt", "readme.md"],
+    "licenca": ["LICENSE", "LICENSE.md", "LICENCA", "LICENSE.txt"],
+    "contributing": ["CONTRIBUTING.md", "docs/CONTRIBUTING.md"],
+    "changelog": ["CHANGELOG.md", "docs/CHANGELOG.md"],
+    "security": ["SECURITY.md", ".github/SECURITY.md"],
+    "instrucoes_agente": ["CLAUDE.md", "AGENTS.md", ".cursorrules", "GEMINI.md"],
+}
+
+
+def _achar_doc(root, nomes):
+    for nome in nomes:
+        p = Path(root) / nome
+        if p.exists():
+            return nome
+    return None
+
+
+def _varre_segredos(root, limite=8):
+    """Procura segredo em arquivo VERSIONADO (git ls-files).
+
+    So o que o git rastreia importa: segredo em .env local nao vaza, segredo
+    commitado vaza pra sempre — mesmo que apagado depois, fica no historico.
+    """
+    rc, so, _ = run(["git", "ls-files"], cwd=root, timeout=60)
+    if rc != 0:
+        return []
+    achados = []
+    exts_ignoradas = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".ico", ".woff",
+                      ".woff2", ".ttf", ".zip", ".gz", ".lock", ".svg", ".webp"}
+    for rel_path in so.splitlines():
+        if len(achados) >= limite:
+            break
+        p = Path(root) / rel_path
+        if p.suffix.lower() in exts_ignoradas or not p.is_file():
+            continue
+        if _e_arquivo_de_teste(rel_path):
+            continue
+        try:
+            if p.stat().st_size > 1_500_000:
+                continue
+            texto = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for rotulo, padrao in SECRET_PATTERNS:
+            m = re.search(padrao, texto)
+            if not m:
+                continue
+            if not _segredo_plausivel(rotulo, m.group(0), texto, m.start()):
+                continue
+            linha = texto[:m.start()].count("\n") + 1
+            achados.append({"file": rel_path, "line": linha, "kind": rotulo})
+            break
+    return achados
+
+
+def _analisa_workflows(root):
+    """Actions sem pin e workflow sem `permissions` — dois vetores conhecidos.
+
+    Action referenciada por tag movel (@v4) executa o que o dono publicar
+    amanha dentro do seu CI, com os seus secrets. Workflow sem bloco
+    `permissions` herda o token com escopo amplo demais.
+    """
+    wdir = Path(root) / ".github" / "workflows"
+    out = {"count": 0, "sem_pin": [], "sem_permissions": [], "arquivos": []}
+    if not wdir.is_dir():
+        return out
+    for f in sorted(list(wdir.glob("*.yml")) + list(wdir.glob("*.yaml"))):
+        out["count"] += 1
+        out["arquivos"].append(f.name)
+        try:
+            texto = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if not re.search(r"^\s*permissions\s*:", texto, re.M):
+            out["sem_permissions"].append(f.name)
+        for m in re.finditer(r"uses:\s*([\w.-]+/[\w.-]+)@([\w.\-/]+)", texto):
+            repo_action, ref = m.group(1), m.group(2)
+            if not re.fullmatch(r"[0-9a-f]{40}", ref):
+                item = f"{repo_action}@{ref}"
+                if item not in out["sem_pin"]:
+                    out["sem_pin"].append(item)
+    return out
+
+
+def _branch_protection(root):
+    """Regra de protecao do branch default, via API do GitHub."""
+    if not has("gh"):
+        return {"disponivel": False, "motivo": "gh cli ausente"}
+    rc, so, _ = run(["gh", "repo", "view", "--json",
+                     "defaultBranchRef,nameWithOwner,visibility"], cwd=root)
+    if rc != 0:
+        return {"disponivel": False, "motivo": "repo sem remote GitHub"}
+    try:
+        info = json.loads(so)
+    except json.JSONDecodeError:
+        return {"disponivel": False, "motivo": "resposta invalida"}
+    branch = (info.get("defaultBranchRef") or {}).get("name") or "main"
+    slug = info.get("nameWithOwner")
+    out = {"disponivel": True, "repo": slug, "branch": branch,
+           "visibility": info.get("visibility"), "protegido": False,
+           "exige_review": None, "exige_checks": None}
+    rc, so, _ = run(["gh", "api", f"repos/{slug}/branches/{branch}/protection"], cwd=root)
+    if rc != 0:
+        return out  # 404 = sem protecao; e a resposta que interessa
+    try:
+        prot = json.loads(so)
+    except json.JSONDecodeError:
+        return out
+    out["protegido"] = True
+    pr = prot.get("required_pull_request_reviews") or {}
+    out["exige_review"] = pr.get("required_approving_review_count", 0) if pr else 0
+    checks = (prot.get("required_status_checks") or {}).get("contexts")
+    out["exige_checks"] = len(checks) if isinstance(checks, list) else 0
+    return out
+
+
+def _deps_desatualizadas(root, cfg):
+    """Quantas dependencias estao para tras. Dependencia velha e divida que
+    rende juros: quanto mais tempo passa, mais caro fica o upgrade."""
+    out = {"ferramenta": None, "total": None, "desatualizadas": None, "exemplos": []}
+    py = cfg.get("python", sys.executable)
+    if (Path(root) / "requirements.txt").exists() or (Path(root) / "pyproject.toml").exists():
+        rc, so, _ = run([py, "-m", "pip", "list", "--outdated", "--format", "json"],
+                        cwd=root, timeout=180)
+        if rc == 0 and so.strip():
+            try:
+                itens = json.loads(so)
+                rc2, so2, _ = run([py, "-m", "pip", "list", "--format", "json"],
+                                  cwd=root, timeout=120)
+                total = len(json.loads(so2)) if rc2 == 0 and so2.strip() else None
+                out.update({
+                    "ferramenta": "pip", "total": total, "desatualizadas": len(itens),
+                    "exemplos": [{"nome": i.get("name"), "atual": i.get("version"),
+                                  "ultima": i.get("latest_version")} for i in itens[:8]],
+                })
+                return out
+            except json.JSONDecodeError:
+                pass
+    if (Path(root) / "package.json").exists() and has("npm"):
+        rc, so, _ = run(["npm", "outdated", "--json"], cwd=root, timeout=180)
+        if so.strip():
+            try:
+                itens = json.loads(so)
+                out.update({"ferramenta": "npm", "desatualizadas": len(itens),
+                            "exemplos": [{"nome": k, "atual": v.get("current"),
+                                          "ultima": v.get("latest")}
+                                         for k, v in list(itens.items())[:8]]})
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+def collect_governance(root, cfg):
+    """Governanca: docs, protecao de branch, supply chain, segredo commitado.
+
+    Nada aqui exige instalar coisa no projeto do cliente — le arquivo, git e
+    a API do GitHub. E o que separa "repositorio de codigo" de "projeto de
+    engenharia" numa auditoria.
+    """
+    root = Path(root)
+    docs = {chave: _achar_doc(root, nomes) for chave, nomes in DOCS_ESPERADOS.items()}
+
+    # Pastas de documentacao viva: ADR, runbook, docs/
+    def _tem_dir(*nomes):
+        for n in nomes:
+            p = root / n
+            if p.is_dir() and any(p.rglob("*.md")):
+                return n
+        return None
+
+    docs["adr"] = _tem_dir("docs/adr", "docs/decisions", "adr", "docs/decisoes")
+    docs["runbooks"] = _tem_dir("docs/runbooks", "runbooks", "docs/deploy/runbooks")
+    docs["docs_dir"] = _tem_dir("docs", "documentation")
+
+    gitignore = root / ".gitignore"
+    ignora_env = False
+    if gitignore.exists():
+        txt = gitignore.read_text(encoding="utf-8", errors="ignore")
+        ignora_env = bool(re.search(r"^\s*\.env", txt, re.M))
+
+    return {
+        "docs": docs,
+        "gitignore": {"existe": gitignore.exists(), "ignora_env": ignora_env},
+        "dependabot": (root / ".github" / "dependabot.yml").exists()
+                      or (root / ".github" / "renovate.json").exists(),
+        "pre_commit": (root / ".pre-commit-config.yaml").exists(),
+        "editorconfig": (root / ".editorconfig").exists(),
+        "containerizado": (root / "Dockerfile").exists()
+                          or bool(list(root.glob("docker-compose*.y*ml"))),
+        "workflows": _analisa_workflows(root),
+        "branch_protection": _branch_protection(root),
+        "segredos_commitados": _varre_segredos(root),
+        "dependencias": _deps_desatualizadas(root, cfg),
+    }
+
+
+# --------------------------------------------------------------------------
+# dora: as 4 metricas que dizem se o time entrega bem
+# --------------------------------------------------------------------------
+
+def _e_deploy(nome_workflow, cfg):
+    palavras = cfg.get("dora", {}).get("deploy_keywords") or ["deploy", "release", "publish", "cd"]
+    n = (nome_workflow or "").lower()
+    return any(p in n for p in palavras)
+
+
+def collect_dora(root, cfg):
+    """DORA (DevOps Research and Assessment): frequencia de deploy, lead time,
+    taxa de falha de mudanca e tempo de recuperacao.
+
+    Sao as 4 metricas que a industria usa pra comparar times — e as unicas do
+    painel que um socio nao-tecnico entende sem tradutor. Derivadas do
+    historico de Actions + git, sem instrumentar nada.
+    """
+    if not has("gh"):
+        raise RuntimeError("gh cli nao encontrado — DORA sai do historico do GitHub Actions")
+
+    limite = cfg.get("dora", {}).get("limit", 120)
+    campos = "conclusion,createdAt,updatedAt,workflowName,headBranch,headSha,event"
+    rc, so, se = run(["gh", "run", "list", "--limit", str(limite), "--json", campos], cwd=root)
+    if rc != 0:
+        raise RuntimeError(se.strip()[:200] or "gh run list falhou")
+    runs = json.loads(so or "[]")
+
+    def _dt(valor):
+        try:
+            return datetime.fromisoformat((valor or "").replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    # Branch de producao: so o que roda nela conta como deploy. Sem esse
+    # filtro, run de PR e de branch de feature inflam a frequencia (visto no
+    # 1o uso real: 50 "deploys por semana" contando CI de pull request).
+    branch_prod = cfg.get("dora", {}).get("branch")
+    if not branch_prod:
+        rc_b, so_b, _ = run(["gh", "repo", "view", "--json", "defaultBranchRef"], cwd=root)
+        try:
+            branch_prod = (json.loads(so_b).get("defaultBranchRef") or {}).get("name")
+        except (json.JSONDecodeError, AttributeError):
+            branch_prod = "main"
+
+    deploys = []
+    for r in runs:
+        if not _e_deploy(r.get("workflowName"), cfg):
+            continue
+        if r.get("conclusion") not in ("success", "failure"):
+            continue
+        if branch_prod and r.get("headBranch") != branch_prod:
+            continue
+        if r.get("event") not in (None, "push", "workflow_dispatch"):
+            continue
+        deploys.append({
+            "quando": _dt(r.get("createdAt")), "fim": _dt(r.get("updatedAt")),
+            "ok": r.get("conclusion") == "success", "sha": r.get("headSha"),
+            "workflow": r.get("workflowName"),
+        })
+    deploys = [d for d in deploys if d["quando"]]
+    deploys.sort(key=lambda d: d["quando"])
+
+    out = {"workflows_de_deploy": sorted({d["workflow"] for d in deploys}),
+           "branch": branch_prod, "deploys_analisados": len(deploys),
+           "janela_dias": None, "deploys_por_semana": None,
+           "lead_time_p50_h": None, "change_failure_rate": None,
+           "mttr_h": None, "ultimo_deploy": None}
+    if not deploys:
+        return out
+
+    janela = (deploys[-1]["quando"] - deploys[0]["quando"]).total_seconds() / 86400 or 1
+    out["janela_dias"] = round(janela, 1)
+    out["deploys_por_semana"] = round(len(deploys) / (janela / 7), 1)
+    out["ultimo_deploy"] = deploys[-1]["quando"].isoformat(timespec="seconds")
+    falhas = [d for d in deploys if not d["ok"]]
+    out["change_failure_rate"] = round(100 * len(falhas) / len(deploys), 1)
+
+    # Lead time: do commit ate o deploy que o levou (mediana).
+    leads = []
+    for d in deploys:
+        if not d["sha"] or not d["ok"]:
+            continue
+        rc, so, _ = run(["git", "show", "-s", "--format=%cI", d["sha"]], cwd=root, timeout=30)
+        commit_dt = _dt(so.strip()) if rc == 0 else None
+        if commit_dt:
+            # Ate o FIM do run: lead time DORA e commit -> em producao, nao
+            # commit -> pipeline comecou.
+            horas = ((d["fim"] or d["quando"]) - commit_dt).total_seconds() / 3600
+            if 0 <= horas < 24 * 30:
+                leads.append(horas)
+    if leads:
+        leads.sort()
+        out["lead_time_p50_h"] = round(leads[len(leads) // 2], 2)
+
+    # MTTR: da falha ate o proximo deploy verde no mesmo workflow.
+    recuperacoes = []
+    for i, d in enumerate(deploys):
+        if d["ok"]:
+            continue
+        for seguinte in deploys[i + 1:]:
+            if seguinte["workflow"] == d["workflow"] and seguinte["ok"]:
+                recuperacoes.append((seguinte["fim"] or seguinte["quando"]
+                                     ) - (d["fim"] or d["quando"]))
+                break
+    if recuperacoes:
+        horas = sorted(r.total_seconds() / 3600 for r in recuperacoes)
+        out["mttr_h"] = round(horas[len(horas) // 2], 2)
+    return out
+
+
 REGISTRY = {
     "stack": collect_stack, "code": collect_code, "quality": collect_quality,
     "tests": collect_tests, "django": collect_django, "git": collect_git,
     "db": collect_db, "infra": collect_infra, "ci": collect_ci,
+    "governance": collect_governance, "dora": collect_dora,
 }
 
 

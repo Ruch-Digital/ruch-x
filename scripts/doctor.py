@@ -142,6 +142,14 @@ def main():
           f"{CINZA}usando o Docker local{FIM}\n      {AMARELO}→ para medir o servidor: "
           f'export RUCHX_DOCKER_HOST="ssh://root@seu-vps"{FIM}')
 
+    # Auditoria (eixos Entrega/Segurança/Processo): tudo vem de git + API do
+    # GitHub. Sem `gh` autenticado o veredito sai capenga, entao avisa aqui.
+    gh_ok = bool(shutil.which("gh"))
+    print(f"  {OK if gh_ok else FALTA} auditoria      ", end="")
+    print(f"{CINZA}DORA, branch protection e supply chain via gh{FIM}" if gh_ok else
+          f"{CINZA}sem gh — eixos Entrega e Processo ficam vazios{FIM}"
+          f"\n      {AMARELO}→ instale o gh e rode: gh auth login{FIM}")
+
     aplicaveis = [c for c in checks if c[4]]
     prontos = sum(1 for c in aplicaveis if c[1])
     print(f"\n{NEGRITO}Próximo passo{FIM}")

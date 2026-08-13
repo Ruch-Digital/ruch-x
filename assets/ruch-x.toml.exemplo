@@ -32,6 +32,13 @@ project_prefix = "meuprojeto"   # filtra containers quando o host tem vários pr
 [ci]
 limit = 40                       # quantas execuções do GitHub Actions analisar
 
+[dora]
+# Como reconhecer um deploy no histórico do Actions. O padrão procura
+# "deploy", "release", "publish" e "cd" no nome do workflow.
+deploy_keywords = ["deploy", "release", "publish", "cd"]
+branch = "main"                  # só o que roda na branch de produção conta
+limit = 120                      # execuções analisadas para as métricas DORA
+
 [db]
 # O DSN vem de RUCHX_DATABASE_URL (ou DATABASE_URL). Use usuário SOMENTE LEITURA:
 #

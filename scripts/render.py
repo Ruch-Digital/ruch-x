@@ -219,6 +219,187 @@ def pluralize_label(snap):
             "Pasta": "Pastas"}.get(base, base + "s")
 
 
+# --------------------------------------------------------------------------
+# auditoria: 5 eixos com nota, evidencia e o que fazer
+# --------------------------------------------------------------------------
+#
+# A diferenca entre "painel de metricas" e "auditoria" e o veredito: numero
+# sozinho deixa a conclusao por conta de quem le, e cada leitor tira uma. Cada
+# criterio abaixo vale pontos de um total, e todo desconto vem com o que fazer
+# pra recuperar — do contrario e so nota baixa sem caminho.
+#
+# As referencias sao as praticas correntes da industria: DORA (Accelerate /
+# State of DevOps) pros numeros de entrega, OWASP e SLSA pra supply chain,
+# Google SRE pra confiabilidade. Os limiares estao explicitos pra poderem ser
+# discutidos com o cliente em vez de saírem de uma caixa-preta.
+
+NIVEIS_DORA = {  # (elite, alto, medio) — abaixo disso e baixo
+    "deploys_por_semana": (7, 1, 0.25),
+    "lead_time_p50_h": (24, 168, 720),      # menor e melhor
+    "change_failure_rate": (15, 30, 45),     # menor e melhor
+    "mttr_h": (1, 24, 168),                  # menor e melhor
+}
+
+
+def _nivel_dora(chave, valor):
+    if valor is None:
+        return None
+    elite, alto, medio = NIVEIS_DORA[chave]
+    if chave == "deploys_por_semana":
+        return "elite" if valor >= elite else "alto" if valor >= alto else "medio" if valor >= medio else "baixo"
+    return "elite" if valor <= elite else "alto" if valor <= alto else "medio" if valor <= medio else "baixo"
+
+
+def _nota(pontos, total):
+    pct = 100 * pontos / total if total else 0
+    letra = ("A" if pct >= 90 else "B" if pct >= 75 else
+             "C" if pct >= 60 else "D" if pct >= 40 else "F")
+    return round(pct), letra
+
+
+def auditoria(snap):
+    """Retorna (eixos, achados). Achado = (prioridade, eixo, texto, acao)."""
+    eixos, achados = [], []
+
+    def eixo(nome, itens, resumo):
+        """itens = [(peso, ok, rotulo, prioridade, achado, acao)]"""
+        total = sum(i[0] for i in itens if i[1] is not None)
+        ganhos = sum(i[0] for i in itens if i[1] is True)
+        for peso, ok, rotulo, prio, txt, acao in itens:
+            if ok is False:
+                achados.append((prio, nome, txt, acao))
+        pct, letra = _nota(ganhos, total)
+        eixos.append({"nome": nome, "pct": pct, "letra": letra, "resumo": resumo,
+                      "checados": [(i[2], i[1]) for i in itens]})
+
+    # ---------------- Entrega (DORA) ----------------
+    d = snap.get("dora") or {}
+    freq, lead = d.get("deploys_por_semana"), d.get("lead_time_p50_h")
+    cfr, mttr = d.get("change_failure_rate"), d.get("mttr_h")
+    n_freq, n_lead = _nivel_dora("deploys_por_semana", freq), _nivel_dora("lead_time_p50_h", lead)
+    n_cfr, n_mttr = _nivel_dora("change_failure_rate", cfr), _nivel_dora("mttr_h", mttr)
+    bom = {"elite", "alto"}
+    eixo("Entrega", [
+        (3, None if freq is None else n_freq in bom, f"frequência de deploy ({freq}/semana)", "P2",
+         f"Deploy {freq}/semana — abaixo do patamar de time de alta performance (1+/semana).",
+         "Encurtar o ciclo: integrar na main com mais frequência e automatizar o caminho até produção."),
+        (3, None if lead is None else n_lead in bom, f"lead time p50 ({lead}h)", "P1",
+         f"Lead time de {lead}h entre commit e produção.",
+         "Reduzir fila e etapas manuais entre merge e deploy."),
+        (3, None if cfr is None else n_cfr in bom, f"taxa de falha ({cfr}%)", "P1",
+         f"{cfr}% das mudanças que chegam na branch de produção falham no pipeline.",
+         "Gatear o merge com a suíte e rodar o teste do módulo tocado antes do push."),
+        (2, None if mttr is None else n_mttr in bom, f"tempo de recuperação ({mttr}h)", "P1",
+         f"Leva {mttr}h em média pra recuperar de uma falha de deploy.",
+         "Rollback documentado e imagem anterior sempre disponível encurtam isso pra minutos."),
+    ], f"{freq}/sem · lead {lead}h · falha {cfr}% · recuperação {mttr}h")
+
+    # ---------------- Qualidade ----------------
+    cov = dig(snap, "tests", "coverage_pct")
+    cx = dig(snap, "quality", "complexity", "above_10")
+    blocos = dig(snap, "quality", "complexity", "blocks_analyzed") or 0
+    pct_cx = (100 * cx / blocos) if (cx is not None and blocos) else None
+    hot = (dig(snap, "git", "hotspots") or [])[:1]
+    hot_ok = None if not hot else hot[0].get("complexity", 0) < 150
+    eixo("Qualidade", [
+        # Cobertura ausente e ACHADO, nao "nao se aplica": nao medir e uma
+        # escolha com consequencia — ninguem sabe o que a suite protege.
+        (4, cov >= 70 if cov is not None else False,
+         f"cobertura ({cov}%)" if cov is not None else "cobertura (não medida)", "P1",
+         "Cobertura de testes não é medida — não há como saber o que a suíte protege."
+         if cov is None else f"Cobertura em {cov}%.",
+         "Rodar a suíte com relatório de cobertura e versionar o resultado a cada coleta."),
+        (3, None if pct_cx is None else pct_cx < 5, f"complexidade ({cx} funções acima de 10)", "P2",
+         f"{cx} funções com complexidade acima de 10 ({pct_cx:.1f}% do total)." if pct_cx else "",
+         "Quebrar as piores em funções menores — começar pelas que aparecem no mapa de atrito."),
+        (3, hot_ok, "arquivo de maior atrito sob controle", "P1",
+         f"O arquivo mais mexido do projeto ({hot[0]['file'] if hot else '—'}) acumula complexidade "
+         f"{hot[0]['complexity'] if hot else '—'} em {hot[0]['loc'] if hot else '—'} linhas." if hot else "",
+         "Dividir em partes menores: cada mudança nele hoje é lenta e arriscada."),
+    ], f"cobertura {cov if cov is not None else '—'} · {cx} funções complexas")
+
+    # ---------------- Segurança ----------------
+    gov = snap.get("governance") or {}
+    seg = gov.get("segredos_commitados") or []
+    wf = gov.get("workflows") or {}
+    deps = gov.get("dependencias") or {}
+    desatual = deps.get("desatualizadas")
+    total_deps = deps.get("total")
+    pct_velhas = (100 * desatual / total_deps) if (desatual is not None and total_deps) else None
+    sec_django = dig(snap, "django", "deploy_issues") or []
+    eixo("Segurança", [
+        (5, len(seg) == 0, "nenhum segredo commitado", "P0",
+         f"{len(seg)} possível(is) segredo(s) em arquivo versionado: "
+         f"{', '.join(s['file'] for s in seg[:3])}.",
+         "Revogar a credencial (o histórico do git guarda para sempre) e mover para variável de ambiente."),
+        (3, not wf.get("sem_pin"), "actions com versão fixada", "P1",
+         f"{len(wf.get('sem_pin') or [])} action(s) referenciada(s) por tag móvel "
+         f"(ex: {(wf.get('sem_pin') or ['—'])[0]}).",
+         "Fixar no SHA do commit: tag pode ser reapontada e roda código novo dentro do seu CI, com seus secrets."),
+        (2, not wf.get("sem_permissions"), "workflows com permissions declarado", "P2",
+         f"{len(wf.get('sem_permissions') or [])} workflow(s) sem bloco `permissions` — herdam token amplo.",
+         "Declarar `permissions:` com o mínimo necessário em cada workflow."),
+        (2, None if pct_velhas is None else pct_velhas < 25, f"dependências atualizadas ({desatual}/{total_deps})", "P2",
+         f"{desatual} de {total_deps} dependências desatualizadas ({pct_velhas:.0f}%)." if pct_velhas else "",
+         "Dependência velha é dívida com juros: quanto mais espera, mais caro e arriscado o upgrade."),
+        (2, gov.get("dependabot"), "atualização automática de dependências", "P2",
+         "Sem Dependabot/Renovate configurado.",
+         "Ligar o Dependabot: ele abre PR de bump e avisa de CVE sem ninguém precisar lembrar."),
+        (3, len(sec_django) == 0 if sec_django is not None else None, "avisos de segurança do framework", "P1",
+         f"{len(sec_django)} aviso(s) de segurança no check de deploy.",
+         "Revisar HSTS, cookies seguros e redirect de SSL nos settings de produção."),
+    ], f"{len(seg)} segredo(s) · {len(wf.get('sem_pin') or [])} action(s) sem pin")
+
+    # ---------------- Confiabilidade ----------------
+    tem_alerta = bool(dig(snap, "infra", "containers")) or bool(snap.get("db"))
+    runbooks = dig(snap, "governance", "docs", "runbooks")
+    pend = dig(snap, "django", "pending_migrations") or []
+    ci_ok = dig(snap, "ci", "success_rate")
+    eixo("Confiabilidade", [
+        (3, None if ci_ok is None else ci_ok >= 85, f"CI verde ({ci_ok}%)", "P1",
+         f"Pipeline verde em apenas {ci_ok}% das execuções.",
+         "Pipeline instável faz o time ignorar vermelho — estabilizar antes de adicionar teste novo."),
+        (3, bool(runbooks), "runbook de operação", "P1",
+         "Sem runbooks: quando algo quebrar às 3h, a resposta está na cabeça de alguém.",
+         "Escrever o passo a passo dos incidentes que já aconteceram — um arquivo por alerta."),
+        (2, len(pend) == 0, "migrations aplicadas", "P2",
+         f"{len(pend)} migration(s) pendente(s) no ambiente medido.",
+         "Aplicar ou confirmar que o alvo da medição é o ambiente certo."),
+        (2, tem_alerta or None, "infraestrutura observável", "P2",
+         "Nenhuma métrica de runtime coletada (containers/banco).",
+         "Expor métrica de container e banco — sem isso, incidente vira adivinhação."),
+    ], f"CI {ci_ok}% · runbooks {'sim' if runbooks else 'não'}")
+
+    # ---------------- Processo ----------------
+    bp = gov.get("branch_protection") or {}
+    docs = gov.get("docs") or {}
+    protegido = bp.get("protegido") if bp.get("disponivel") else None
+    eixo("Processo", [
+        (4, protegido, "branch de produção protegida", "P1",
+         f"A branch `{bp.get('branch', 'main')}` aceita push direto, sem revisão nem check obrigatório.",
+         "Ligar proteção exigindo status check verde — é a única barreira que não depende de disciplina."),
+        (2, bool(docs.get("readme")), "README", "P2",
+         "Sem README: quem chega no repositório não sabe rodar o projeto.",
+         "Descrever o que é, como rodar e como testar."),
+        (2, bool(docs.get("adr")) or bool(docs.get("docs_dir")), "decisões documentadas", "P2",
+         "Sem registro de decisões técnicas (ADR ou pasta de docs).",
+         "Registrar por que cada escolha estrutural foi feita — evita re-litigar decisão antiga."),
+        (1, bool(docs.get("licenca")), "licença", "P2",
+         "Sem arquivo de licença — em repositório privado é aceitável; público, não.",
+         "Adicionar LICENSE se o código for distribuído."),
+        (1, gov.get("pre_commit") or None, "hooks de pre-commit", "P2",
+         "Sem pre-commit: lint e formatação dependem de lembrete humano.",
+         "Configurar pre-commit com o linter que já está no projeto."),
+        (2, bool(docs.get("changelog")) or None, "histórico de mudanças", "P2",
+         "Sem CHANGELOG.",
+         "Gerar a partir dos commits se eles seguirem convenção."),
+    ], f"branch {'protegida' if protegido else 'desprotegida'}")
+
+    ordem = {"P0": 0, "P1": 1, "P2": 2}
+    achados.sort(key=lambda a: ordem.get(a[0], 9))
+    return eixos, achados
+
+
 def findings(snap):
     """
     Regras simples que transformam numero em recomendacao. Um dashboard que so
@@ -312,6 +493,37 @@ def findings(snap):
 # --------------------------------------------------------------------------
 # secoes
 # --------------------------------------------------------------------------
+
+def build_veredito(snap):
+    """Notas por eixo + plano de ação. E a primeira coisa que o cliente vê."""
+    eixos, achados = auditoria(snap)
+    if not eixos:
+        return '<p class="empty">sem dados suficientes para o veredito</p>'
+
+    cards = []
+    for x in eixos:
+        checados = "".join(
+            f'<li class="{"sim" if ok else "nao" if ok is False else "na"}">{e(rot)}</li>'
+            for rot, ok in x["checados"]
+        )
+        cards.append(
+            f'<div class="eixo nota-{x["letra"]}">'
+            f'<div class="letra">{x["letra"]}</div>'
+            f'<div class="eixo-corpo"><h3>{e(x["nome"])}</h3>'
+            f'<p class="eixo-resumo">{e(x["resumo"])}</p>'
+            f'<ul class="checklist">{checados}</ul></div></div>'
+        )
+
+    linhas = "".join(
+        f'<tr><td><span class="prio {p}">{p}</span></td><td>{e(eixo)}</td>'
+        f'<td><b>{e(txt)}</b><br><span class="acao">{e(acao)}</span></td></tr>'
+        for p, eixo, txt, acao in achados[:12]
+    ) or '<tr><td colspan="3">Nenhum desvio nos critérios auditados.</td></tr>'
+
+    return (f'<div class="eixos">{"".join(cards)}</div>'
+            f'<table class="plano"><thead><tr><th></th><th>eixo</th>'
+            f'<th>o que corrigir e como</th></tr></thead><tbody>{linhas}</tbody></table>')
+
 
 def section(title, note, body, ident=None):
     anchor = f' id="{ident}"' if ident else ""
@@ -532,6 +744,35 @@ h2{font-size:13px;font-family:var(--mono);letter-spacing:.13em;text-transform:up
 h3{font-size:13px;font-weight:700;letter-spacing:-.01em;margin:28px 0 8px}
 .note{font-size:13px;color:var(--soft);margin:8px 0 14px;max-width:66ch}
 
+/* veredito: notas por eixo + plano de acao */
+.eixos{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:12px;margin-top:18px}
+.eixo{display:flex;gap:13px;background:var(--card);border:1px solid var(--rule);padding:15px 16px}
+.eixo .letra{font-family:var(--mono);font-size:30px;font-weight:700;line-height:1;
+             letter-spacing:-.04em;min-width:36px}
+.nota-A .letra,.nota-B .letra{color:var(--good)}
+.nota-C .letra{color:var(--warn)}
+.nota-D .letra,.nota-F .letra{color:var(--bad)}
+.eixo h3{margin:0 0 3px;font-size:12.5px}
+.eixo-resumo{font-size:11.5px;color:var(--soft);font-family:var(--mono);margin:0 0 8px;
+             line-height:1.5}
+.checklist{list-style:none;padding:0;margin:0;font-size:11.5px;line-height:1.75}
+.checklist li{color:var(--soft);padding-left:17px;position:relative}
+.checklist li::before{position:absolute;left:0;font-family:var(--mono)}
+.checklist .sim::before{content:"✓";color:var(--good)}
+.checklist .nao::before{content:"✗";color:var(--bad)}
+.checklist .na::before{content:"–"}
+.checklist .nao{color:var(--ink)}
+.plano{width:100%;border-collapse:collapse;margin-top:20px;font-size:13px}
+.plano th{text-align:left;font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+          text-transform:uppercase;color:var(--soft);padding:0 10px 8px 0;font-weight:600}
+.plano td{padding:11px 10px 11px 0;border-top:1px solid var(--rule);vertical-align:top}
+.plano .acao{color:var(--soft);font-size:12px;line-height:1.55}
+.prio{font-family:var(--mono);font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;
+      letter-spacing:.06em;white-space:nowrap}
+.prio.P0{background:rgba(220,38,38,.14);color:var(--bad)}
+.prio.P1{background:rgba(217,119,6,.14);color:var(--warn)}
+.prio.P2{background:rgba(100,116,139,.14);color:var(--soft)}
+
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(184px,1fr));
        background:var(--card);border:1px solid var(--rule);border-width:1px 0 0 1px;margin-top:18px}
 .stat{background:var(--card);padding:16px 16px 13px;border:1px solid var(--rule);
@@ -638,6 +879,11 @@ def render(snaps):
         f'<div class="meta">{"".join(meta)}</div>',
         '</header>',
         build_signals(snap, snaps),
+        section("Veredito da auditoria",
+                "Cinco eixos, cada um com os critérios que a engenharia atual considera padrão. "
+                "A nota é a fração dos critérios atendidos; a tabela abaixo é o plano de ação, "
+                "da prioridade mais alta para a mais baixa.",
+                build_veredito(snap), ident="veredito"),
         section("O que olhar primeiro",
                 "Ordenado por impacto, não por seção. Se estiver tudo vazio, o projeto passou nos limiares.",
                 f'<ul class="findings">{findings_html}</ul>'),

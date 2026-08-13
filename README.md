@@ -1,15 +1,41 @@
 # Ruch-X
 
-O raio-x de um repositório. Coleta métricas de saúde do projeto e gera um
-**dashboard HTML que abre offline**, com comparação contra as coletas anteriores.
+Auditoria de engenharia de um repositório, em **qualquer linguagem**: dá nota de
+A a F em cinco eixos, entrega um plano de ação priorizado e gera um **dashboard
+HTML que abre offline**, comparando com as coletas anteriores.
 
 Funciona como [skill do Claude Code](https://docs.claude.com/en/docs/claude-code/skills)
 ou como dois scripts Python soltos — não precisa instalar nada no projeto medido.
 
-O objetivo não é encher a tela de número. É responder três perguntas:
-**o que mudou desde a última vez**, **onde dói mais agora**, e **o que fazer a respeito**.
+Ele responde o que um cliente paga pra ouvir: *"vocês entregam rápido e com
+segurança?"*, *"o que acontece quando quebra?"*, *"dá pra manter esse código no
+ano que vem?"*.
 
-## O que ele mede
+## O veredito
+
+Cinco eixos, cada um com nota e os critérios que a engenharia atual considera
+padrão — **DORA** (Accelerate / State of DevOps) para entrega, **OWASP** e
+**SLSA** para supply chain, **Google SRE** para confiabilidade:
+
+| Eixo | O que audita |
+|---|---|
+| **Entrega** | as 4 métricas DORA: frequência de deploy, lead time do commit até produção, taxa de falha de mudança, tempo de recuperação |
+| **Qualidade** | cobertura, complexidade e o arquivo de maior atrito |
+| **Segurança** | segredo commitado, action sem pin, `permissions` no workflow, dependência velha, atualização automática, avisos do framework |
+| **Confiabilidade** | CI verde, runbook de operação, migrations aplicadas, infraestrutura observável |
+| **Processo** | branch protegida, README, decisões documentadas, licença, pre-commit, changelog |
+
+Cada desconto de nota vira uma linha do plano com **prioridade (P0/P1/P2)**, o
+que está errado e **como corrigir** — nota sem caminho é só nota baixa. Os
+limiares ficam explícitos em `auditoria()` no `render.py`, de propósito: numa
+auditoria o critério se discute, não se recebe de caixa-preta.
+
+Dois cuidados que estão no código porque nasceram de uso real: **segredo em
+arquivo de teste ou com placeholder não é vazamento** (senão o relatório perde a
+credibilidade no primeiro alarme falso), e **cobertura ausente conta como
+achado**, não como "não se aplica" — não medir é uma escolha com consequência.
+
+## O que mais ele mede
 
 | Área | O que sai |
 |---|---|
