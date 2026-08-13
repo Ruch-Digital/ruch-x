@@ -71,6 +71,127 @@ class TestRedigirNaoRegressao(unittest.TestCase):
         texto = "src/api_key_helper.py"
         self.assertEqual(collect.redigir(texto), texto)
 
+    def test_coluna_password_hash_em_lista_de_tabela_nao_muda(self):
+        # Nome de coluna real do Postgres — "password" e prefixo de um
+        # identificador, nao uma atribuicao. Pedido no fix round 1.
+        texto = "id, username, password_hash, created_at"
+        self.assertEqual(collect.redigir(texto), texto)
+
+    def test_mensagem_libpq_sem_credencial_nao_muda(self):
+        # Texto real do libpq (traduzido) — "senha" aparece como PALAVRA,
+        # sem "=" nem ":" depois. Nenhuma credencial na frase.
+        texto = 'senha authentication failed for user "leitor"'
+        self.assertEqual(collect.redigir(texto), texto)
+
+    def test_arquivo_guia_bearer_nao_muda(self):
+        # "bearer" sem espaco depois (hifen) nao pode disparar o padrao
+        # de header HTTP.
+        texto = "docs/bearer-token-guide.md"
+        self.assertEqual(collect.redigir(texto), texto)
+
+
+class TestRedigirFixRound1(unittest.TestCase):
+    """4 achados Critical da revisao adversarial (fix round 1/5).
+
+    Cada teste usa a entrada VERBATIM do achado, mais os vizinhos obvios
+    (DSN com dois "@", Bearer curto vs longo, PEM com e sem corpo) pedidos
+    junto com o fix.
+    """
+
+    # Critical 1 — scripts/collect.py:117 — a classe da senha excluia "@",
+    # entao o regex parava no PRIMEIRO "@" e vazava o resto da senha como
+    # se fosse host, com "***" dando falsa sensacao de que a linha foi
+    # tratada.
+    def test_critical1_dsn_com_arroba_na_senha(self):
+        texto = "postgresql://leitor:p@ss:w0rd@10.0.0.9:5432/prod"
+        saida = collect.redigir(texto)
+        # "w0rd" e o pedaco que o padrao antigo deixava vazar (parava no
+        # PRIMEIRO "@", mascarando so o "p" e devolvendo "ss:w0rd" cru).
+        self.assertNotIn("w0rd", saida)
+        self.assertNotIn("p@ss:w0rd", saida)
+        self.assertIn("leitor:***@", saida)
+        self.assertIn("10.0.0.9:5432/prod", saida)  # diagnostico fica
+
+    def test_critical1_vizinho_dsn_dois_arrobas_ordem_diferente(self):
+        texto = "mysql://u:se@nha@db.internal:3306/app"
+        saida = collect.redigir(texto)
+        # "nha" e o pedaco que vazava (padrao antigo mascarava so "se").
+        self.assertNotIn("nha", saida)
+        self.assertNotIn("se@nha", saida)
+        self.assertIn("db.internal:3306/app", saida)
+
+    # Critical 2 — :119-120 — variavel composta por letras (sem separador
+    # nao-letra antes da keyword) nao era detectada. PGPASSWORD e a
+    # variavel canonica do libpq.
+    def test_critical2_pgpassword(self):
+        saida = collect.redigir("PGPASSWORD=xyz123456")
+        self.assertNotIn("xyz123456", saida)
+
+    def test_critical2_vizinho_mysql_pwd(self):
+        saida = collect.redigir("MYSQL_PWD=xyz123456")
+        self.assertNotIn("xyz123456", saida)
+
+    def test_critical2_vizinho_sufixo_pwd_generico(self):
+        saida = collect.redigir("DB_PWD=outraSenha1")
+        self.assertNotIn("outraSenha1", saida)
+
+    # Critical 3 — :119-120 — chave entre aspas (JSON) tem uma aspa de
+    # fechamento entre a keyword e o separador "[=:]", que o padrao antigo
+    # nao tolerava.
+    def test_critical3_chave_entre_aspas_json(self):
+        saida = collect.redigir('{"password": "abc123456"}')
+        self.assertNotIn("abc123456", saida)
+        self.assertIn('"password"', saida)  # rotulo da chave sobrevive
+
+    def test_critical3_vizinho_token_entre_aspas_json(self):
+        saida = collect.redigir('{"token": "ghsecretvalue123"}')
+        self.assertNotIn("ghsecretvalue123", saida)
+
+    # Critical 4 — :115-125 — sem padrao pra Bearer token nem bloco PEM.
+    def test_critical4_bearer_token(self):
+        texto = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abcdefgh.ijklmnop"
+        saida = collect.redigir(texto)
+        self.assertNotIn("eyJhbGciOiJIUzI1NiJ9.abcdefgh.ijklmnop", saida)
+        self.assertIn("Bearer ***", saida)
+        self.assertIn("Authorization:", saida)
+
+    def test_critical4_vizinho_bearer_curto(self):
+        saida = collect.redigir("Bearer abc123")
+        self.assertNotIn("abc123", saida)
+        self.assertIn("Bearer ***", saida)
+
+    def test_critical4_vizinho_bearer_longo(self):
+        token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "x" * 60
+        saida = collect.redigir(f"Bearer {token}")
+        self.assertNotIn(token, saida)
+        self.assertIn("Bearer ***", saida)
+
+    def test_critical4_pem_com_corpo(self):
+        texto = (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEF\n"
+            "AASCBKc=\n"
+            "-----END PRIVATE KEY-----"
+        )
+        saida = collect.redigir(texto)
+        self.assertNotIn("MIIEvQIBADANBgkqhkiG9w0BAQEF", saida)
+        self.assertIn("-----BEGIN PRIVATE KEY-----", saida)
+        self.assertIn("-----END PRIVATE KEY-----", saida)
+
+    def test_critical4_vizinho_pem_variante_rsa(self):
+        texto = ("-----BEGIN RSA PRIVATE KEY-----\nABCDEFGHIJKLMNOP\n"
+                  "-----END RSA PRIVATE KEY-----")
+        saida = collect.redigir(texto)
+        self.assertNotIn("ABCDEFGHIJKLMNOP", saida)
+        self.assertIn("-----BEGIN RSA PRIVATE KEY-----", saida)
+        self.assertIn("-----END RSA PRIVATE KEY-----", saida)
+
+    def test_critical4_vizinho_pem_sem_corpo(self):
+        texto = "-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----"
+        saida = collect.redigir(texto)
+        self.assertIn("-----BEGIN PRIVATE KEY-----", saida)
+        self.assertIn("-----END PRIVATE KEY-----", saida)
+
 
 class TestRedigirEstrutura(unittest.TestCase):
 

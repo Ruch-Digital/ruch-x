@@ -112,17 +112,45 @@ def _motivo(rc, se):
 # existe porque `\b` nao separa "_" de letra: sem ele, `DATABASE_PASSWORD=...`
 # nao seria pego (o "_" antes de "PASSWORD" nao e fronteira de palavra pro
 # regex). O prefixo capturado volta no replace pra nao comer o "_"/inicio.
+#
+# Fix round 1 (revisao adversarial, 4 achados Critical):
+# 1. DSN: a senha pode conter "@"/":" literal (ex: "p@ss:w0rd"). O padrao
+#    original tinha a classe da senha excluindo "@", entao parava no
+#    PRIMEIRO "@" e vazava o resto da senha como se fosse host. Trocado
+#    pra `[^\s/]+` (so exclui espaco/barra, aceita "@" e ":"): sendo
+#    guloso, o regex backtracka ate o ULTIMO "@" antes do host/path.
+# 2. Nome composto por letras (sem separador nao-letra) tambem e credencial:
+#    "PGPASSWORD" (variavel canonica do libpq) nao tem "_" nem espaco antes
+#    de "PASSWORD" — adicionado como keyword explicita, do mesmo jeito que
+#    os limiares da auditoria: material auditavel, nao regra generica.
+#    "pwd"/"*_PWD"/"MYSQL_PWD" ja caem no `(^|[^A-Za-z])` existente (tem
+#    "_" antes), so precisavam de "pwd" na lista de keywords.
+# 3. Chave entre aspas (`"password": "valor"`, JSON) tem uma aspa de
+#    fechamento ENTRE a keyword e o separador `[=:]` — o separador exigia
+#    vir logo depois da keyword. Adicionado grupo de aspa opcional dos dois
+#    lados da keyword+separador.
+# 4. Bearer token e bloco PEM nao tinham padrao nenhum — adicionados como
+#    padroes proprios (nao cabem no formato chave=valor).
 REDACOES = [
-    # senha embutida em URL/DSN: mantem usuario e host (diagnostico) e mata a senha
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://[^\s:@/]+:)[^\s@/]+(@)"), r"\1***\2"),
+    # senha embutida em URL/DSN: mantem usuario e host (diagnostico) e mata
+    # a senha ate o ULTIMO "@" antes do host (a senha pode conter "@"/":").
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://[^\s:@/]+:)[^\s/]+(@)"), r"\1***\2"),
     (re.compile(r"(?i)\b(PASSWORD)\s+'[^']*'"), r"\1 '***'"),
-    (re.compile(r"(?i)(^|[^A-Za-z])(password|passwd|senha|secret[_-]?key|api[_-]?key|token)"
-                r"(\s*[=:]\s*)([\"']?)[^\s\"';,]{6,}"), r"\1\2\3\4***"),
+    (re.compile(r"(?i)(^|[^A-Za-z])(password|passwd|pwd|pgpassword|senha|"
+                r"secret[_-]?key|api[_-]?key|token)"
+                r"([\"']?)(\s*[=:]\s*)([\"']?)[^\s\"';,]{6,}"), r"\1\2\3\4\5***"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "***"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "***"),
     (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}"), "***"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "***"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "***"),
+    # header HTTP de autenticacao: "Bearer <token>" -> mata so o token
+    (re.compile(r"(?i)\b(bearer)\s+\S+"), r"\1 ***"),
+    # bloco PEM (chave privada RSA/EC/OPENSSH/generica): mata o corpo,
+    # mantem os marcadores BEGIN/END (o achado de que existe uma chave e
+    # relevante pro diagnostico; o conteudo da chave nao)
+    (re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)(.*?)(-----END [A-Z ]*PRIVATE KEY-----)",
+                re.DOTALL), r"\1***\3"),
 ]
 
 
