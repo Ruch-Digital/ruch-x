@@ -59,12 +59,57 @@ def num(v, sufixo=""):
     """Valor que o painel trata como numero.
 
     O snapshot pode ter sido escrito por outra pessoa (ele e versionado e
-    viaja junto do repositorio). Interpolar cru o que se supoe numero foi a
-    unica via de XSS do dashboard: em JSON forjado esses campos sao string.
+    viaja junto do repositorio). Interpolar cru o que se supoe numero era
+    a via mais obvia de XSS do dashboard (achada em 9 pontos) — mas nao a
+    unica: qualquer `{campo}` cru dentro de uma tag, vindo de snapshot
+    forjado, e a mesma classe de bug. `num()` cobre os pontos numericos;
+    os de texto livre sempre passaram por `e()`.
     """
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return e(v)
     return f"{v}{sufixo}"
+
+
+def milhar(v):
+    """Numero inteiro com separador de milhar (ponto, padrao BR), ou None se
+    `v` nao for numero (snapshot forjado/malformado). O resultado so tem
+    digitos e ponto — nunca precisa passar por `e()`/`num()` depois, o
+    formato em si ja e seguro (e nunca lanca excecao)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return f"{v:,.0f}".replace(",", ".")
+
+
+def _seguro(v, tipos, default=None):
+    """`v` se `isinstance(v, tipos)`, senao `default`.
+
+    Peca central contra snapshot forjado/malformado: um campo que deveria
+    ser numero/lista/dict mas chegou como outra coisa (string onde
+    esperava lista, int onde esperava dict etc) vira o default aqui —
+    ANTES de qualquer conta, indexacao ou `.get()` que assumiria a forma
+    certa e estouraria TypeError/AttributeError/KeyError la na frente.
+    """
+    return v if isinstance(v, tipos) else default
+
+
+def _dentro_de(caminho, base):
+    """True se `caminho` (resolvido, symlinks seguidos) estiver dentro de
+    `base` (tambem resolvido) — ou for o proprio `base`. Defesa contra o
+    destino final do dashboard escapar do diretorio de snapshots."""
+    caminho, base = caminho.resolve(), base.resolve()
+    return caminho == base or base in caminho.parents
+
+
+def _arquivos(itens, chave="file", limite=3):
+    """Nomes de arquivo de uma lista de achados, pra texto de achado.
+
+    Tolera item que nao e dict e item sem a chave — nao propaga
+    KeyError/TypeError pro render por causa de um `{"file": ...}` faltando
+    num snapshot malformado ou forjado.
+    """
+    nomes = [i.get(chave) for i in (itens or [])[:limite]
+             if isinstance(i, dict) and i.get(chave)]
+    return ", ".join(str(n) for n in nomes)
 
 
 def human_bytes(n):
@@ -172,7 +217,12 @@ def hotspot_plot(hotspots, w=760, h=400):
     O quadrante superior direito eh o unico que importa: codigo dificil que
     voce mexe toda hora. Refatorar canto inferior esquerdo eh perder tempo.
     """
-    pts = [p for p in (hotspots or []) if p.get("churn") and p.get("complexity")]
+    # isinstance duplo: item tem que ser dict, E churn/complexity tem que ser
+    # numero de verdade — senao o `max(...) * 1.08` la embaixo estoura
+    # TypeError pra string, e `loc` negativo vira `complex` na conta do raio.
+    pts = [p for p in (hotspots or []) if isinstance(p, dict)
+           and isinstance(p.get("churn"), (int, float))
+           and isinstance(p.get("complexity"), (int, float))]
     if len(pts) < 3:
         return '<p class="empty">histórico de git insuficiente para o mapa</p>'
 
@@ -211,10 +261,16 @@ def hotspot_plot(hotspots, w=760, h=400):
 
     for p in pts[:60]:
         x, y = sx(p["churn"]), sy(p["complexity"])
-        r = max(3.0, min(11.0, (p.get("loc", 0) / 90) ** 0.72))
+        # loc negativo (snapshot forjado) elevado a 0.72 vira `complex` em
+        # Python — `max()`/`min()` contra complex estoura TypeError. loc
+        # nao-numerico ou negativo vira 0 (raio minimo), nunca crasha.
+        loc = p.get("loc", 0)
+        loc = loc if isinstance(loc, (int, float)) and loc >= 0 else 0
+        r = max(3.0, min(11.0, (loc / 90) ** 0.72))
         hot = p["churn"] >= med_x and p["complexity"] >= med_y
         cls = "dot hot" if hot else "dot"
-        label = f'{p["file"]} · {p["churn"]}x alterações · complexidade {p["complexity"]} · {p.get("loc", 0)} linhas'
+        label = (f'{p.get("file", "?")} · {p["churn"]}x alterações · '
+                 f'complexidade {p["complexity"]} · {loc} linhas')
         parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" class="{cls}">'
                      f'<title>{e(label)}</title></circle>')
 
@@ -284,7 +340,14 @@ def _nivel_dora(chave, valor):
 
 
 def _nota(pontos, total):
-    pct = 100 * pontos / total if total else 0
+    """(pct, letra). `total == 0` significa "nenhum criterio deste eixo pode
+    ser medido" — nao pode virar 0% "F" (reprovacao falsa: o mesmo pecado do
+    achado parqueado, so que na direcao oposta). Eixo sem nenhum criterio
+    medido nao recebe letra nenhuma; "NA" e um marcador, tratado a parte na
+    tela (nunca nota-F)."""
+    if not total:
+        return None, "NA"
+    pct = 100 * pontos / total
     letra = ("A" if pct >= 90 else "B" if pct >= 75 else
              "C" if pct >= 60 else "D" if pct >= 40 else "F")
     return round(pct), letra
@@ -306,9 +369,15 @@ def auditoria(snap):
                       "checados": [(i[2], i[1]) for i in itens]})
 
     # ---------------- Entrega (DORA) ----------------
-    d = snap.get("dora") or {}
-    freq, lead = d.get("deploys_por_semana"), d.get("lead_time_p50_h")
-    cfr, mttr = d.get("change_failure_rate"), d.get("mttr_h")
+    # extracao via dig() + _seguro (sem intermediario `d`): se "dora" no
+    # snapshot for uma string em vez de dict, dig() ja devolve None em vez
+    # de deixar um `.get()` cru estourar AttributeError; _seguro barra o
+    # campo que existe mas nao e numero (a comparacao em _nivel_dora
+    # estouraria TypeError contra string).
+    freq = _seguro(dig(snap, "dora", "deploys_por_semana"), (int, float))
+    lead = _seguro(dig(snap, "dora", "lead_time_p50_h"), (int, float))
+    cfr = _seguro(dig(snap, "dora", "change_failure_rate"), (int, float))
+    mttr = _seguro(dig(snap, "dora", "mttr_h"), (int, float))
     n_freq, n_lead = _nivel_dora("deploys_por_semana", freq), _nivel_dora("lead_time_p50_h", lead)
     n_cfr, n_mttr = _nivel_dora("change_failure_rate", cfr), _nivel_dora("mttr_h", mttr)
     bom = {"elite", "alto"}
@@ -328,13 +397,19 @@ def auditoria(snap):
     ], f"{freq}/sem · lead {lead}h · falha {cfr}% · recuperação {mttr}h")
 
     # ---------------- Qualidade ----------------
-    cov = dig(snap, "tests", "coverage_pct")
-    cov_idade = dig(snap, "tests", "coverage_age_days")
-    cx = dig(snap, "quality", "complexity", "above_10")
-    blocos = dig(snap, "quality", "complexity", "blocks_analyzed") or 0
+    cov = _seguro(dig(snap, "tests", "coverage_pct"), (int, float))
+    cov_idade = _seguro(dig(snap, "tests", "coverage_age_days"), int)
+    cx = _seguro(dig(snap, "quality", "complexity", "above_10"), (int, float))
+    blocos = _seguro(dig(snap, "quality", "complexity", "blocks_analyzed"), (int, float)) or 0
     pct_cx = (100 * cx / blocos) if (cx is not None and blocos) else None
-    hot = (dig(snap, "git", "hotspots") or [])[:1]
-    hot_ok = None if not hot else hot[0].get("complexity", 0) < 150
+    # so o primeiro item que E dict (com churn/complexity numericos ja
+    # filtrados por hotspot_plot em outro lugar, mas aqui e um caminho
+    # separado) conta como "o hotspot" — item malformado no topo da lista
+    # nao pode derrubar o render, so e ignorado.
+    hotspots_raw = _seguro(dig(snap, "git", "hotspots"), list) or []
+    hot0 = next((h for h in hotspots_raw if isinstance(h, dict)), None)
+    hot0_cx = _seguro(hot0.get("complexity"), (int, float), 0) if hot0 else 0
+    hot_ok = None if hot0 is None else hot0_cx < 150
     eixo("Qualidade", [
         # Cobertura ausente e ACHADO, nao "nao se aplica": nao medir e uma
         # escolha com consequencia — ninguem sabe o que a suite protege.
@@ -349,38 +424,45 @@ def auditoria(snap):
          f"{cx} funções com complexidade acima de 10 ({pct_cx:.1f}% do total)." if pct_cx else "",
          "Quebrar as piores em funções menores — começar pelas que aparecem no mapa de atrito."),
         (3, hot_ok, "arquivo de maior atrito sob controle", "P1",
-         f"O arquivo mais mexido do projeto ({hot[0]['file'] if hot else '—'}) acumula complexidade "
-         f"{hot[0]['complexity'] if hot else '—'} em {hot[0]['loc'] if hot else '—'} linhas." if hot else "",
+         f"O arquivo mais mexido do projeto ({hot0.get('file', '—') if hot0 else '—'}) acumula "
+         f"complexidade {hot0_cx} em {hot0.get('loc', '—') if hot0 else '—'} linhas." if hot0 else "",
          "Dividir em partes menores: cada mudança nele hoje é lenta e arriscada."),
     ], f"cobertura {cov if cov is not None else '—'} · {cx} funções complexas")
 
     # ---------------- Segurança ----------------
-    gov = snap.get("governance") or {}
-    seg = gov.get("segredos_commitados")
+    # `gov`/`wf` sanitizados via `_seguro`: se "governance" (ou seu campo
+    # "workflows") vier como string no snapshot, um `.get()` cru estourava
+    # AttributeError — `_seguro` converte em {} ANTES do `.get()`.
+    gov = _seguro(snap.get("governance"), dict, {})
+    # `seg` preserva o None de "nao medido" (`_seguro` com lista tambem cai
+    # em None se o campo vier malformado — malformado converge com "nao
+    # medido", nunca vira credito de seguranca de graca).
+    seg = _seguro(gov.get("segredos_commitados"), list)
     # `wf_raw` preserva o None de "governance inteiro nao rodou" (o unico jeito
     # de wf ser None — o coletor individual sempre devolve dict, mesmo vazio).
     # `wf` (com `or {}`) e so pra leitura de texto/contagem, nunca pra decidir
     # ok — senao a falta de medicao vira "actions com pin" de graca, o mesmo
     # efeito que o achado parqueado tinha em segredos_commitados.
-    wf_raw = gov.get("workflows")
+    wf_raw = _seguro(gov.get("workflows"), dict)
     wf = wf_raw or {}
-    deps = gov.get("dependencias") or {}
-    desatual = deps.get("desatualizadas")
-    total_deps = deps.get("total")
+    sem_pin = _seguro(wf.get("sem_pin"), list) or []
+    sem_perm = _seguro(wf.get("sem_permissions"), list) or []
+    deps = _seguro(gov.get("dependencias"), dict, {})
+    desatual = _seguro(deps.get("desatualizadas"), (int, float))
+    total_deps = _seguro(deps.get("total"), (int, float))
     pct_velhas = (100 * desatual / total_deps) if (desatual is not None and total_deps) else None
-    sec_django = dig(snap, "django", "deploy_issues")
+    sec_django = _seguro(dig(snap, "django", "deploy_issues"), list)
     eixo("Segurança", [
         (5, None if seg is None else len(seg) == 0,
          "nenhum segredo commitado" + _nao_medido(snap, "governance", "segredos_commitados"), "P0",
-         f"{len(seg or [])} possível(is) segredo(s) em arquivo versionado: "
-         f"{', '.join(s['file'] for s in (seg or [])[:3])}.",
+         f"{len(seg or [])} possível(is) segredo(s) em arquivo versionado: {_arquivos(seg)}.",
          "Revogar a credencial (o histórico do git guarda para sempre) e mover para variável de ambiente."),
-        (3, None if wf_raw is None else not wf.get("sem_pin"), "actions com versão fixada", "P1",
-         f"{len(wf.get('sem_pin') or [])} action(s) referenciada(s) por tag móvel "
-         f"(ex: {(wf.get('sem_pin') or ['—'])[0]}).",
+        (3, None if wf_raw is None else len(sem_pin) == 0, "actions com versão fixada", "P1",
+         f"{len(sem_pin)} action(s) referenciada(s) por tag móvel "
+         f"(ex: {sem_pin[0] if sem_pin else '—'}).",
          "Fixar no SHA do commit: tag pode ser reapontada e roda código novo dentro do seu CI, com seus secrets."),
-        (2, None if wf_raw is None else not wf.get("sem_permissions"), "workflows com permissions declarado", "P2",
-         f"{len(wf.get('sem_permissions') or [])} workflow(s) sem bloco `permissions` — herdam token amplo.",
+        (2, None if wf_raw is None else len(sem_perm) == 0, "workflows com permissions declarado", "P2",
+         f"{len(sem_perm)} workflow(s) sem bloco `permissions` — herdam token amplo.",
          "Declarar `permissions:` com o mínimo necessário em cada workflow."),
         (2, None if pct_velhas is None else pct_velhas < 25, f"dependências atualizadas ({desatual}/{total_deps})", "P2",
          f"{desatual} de {total_deps} dependências desatualizadas ({pct_velhas:.0f}%)." if pct_velhas else "",
@@ -400,13 +482,13 @@ def auditoria(snap):
          f"{len(sec_django or [])} aviso(s) de segurança no check de deploy "
          f"(settings: {dig(snap, 'django', 'settings_module') or 'do ambiente'}).",
          "Revisar HSTS, cookies seguros e redirect de SSL nos settings de produção."),
-    ], f"{len(seg or [])} segredo(s) · {len(wf.get('sem_pin') or [])} action(s) sem pin")
+    ], f"{len(seg or [])} segredo(s) · {len(sem_pin)} action(s) sem pin")
 
     # ---------------- Confiabilidade ----------------
     tem_alerta = bool(dig(snap, "infra", "containers")) or bool(snap.get("db"))
     runbooks = dig(snap, "governance", "docs", "runbooks")
-    pend = dig(snap, "django", "pending_migrations")
-    ci_ok = dig(snap, "ci", "success_rate")
+    pend = _seguro(dig(snap, "django", "pending_migrations"), list)
+    ci_ok = _seguro(dig(snap, "ci", "success_rate"), (int, float))
     eixo("Confiabilidade", [
         (3, None if ci_ok is None else ci_ok >= 85, f"CI verde ({ci_ok}%)", "P1",
          f"Pipeline verde em apenas {ci_ok}% das execuções.",
@@ -424,8 +506,8 @@ def auditoria(snap):
     ], f"CI {ci_ok}% · runbooks {'sim' if runbooks else 'não'}")
 
     # ---------------- Processo ----------------
-    bp = gov.get("branch_protection") or {}
-    docs = gov.get("docs") or {}
+    bp = _seguro(gov.get("branch_protection"), dict, {})
+    docs = _seguro(gov.get("docs"), dict, {})
     protegido = bp.get("protegido") if bp.get("disponivel") else None
     eixo("Processo", [
         (4, protegido, "branch de produção protegida", "P1",
@@ -497,35 +579,38 @@ def findings(snap):
                                 f"DESENVOLVIMENTO — normal aqui. Configure "
                                 f"[django] settings_module pra auditar produção."))
 
-    outros = dig(snap, "django", "other_issues") or []
+    outros = _seguro(dig(snap, "django", "other_issues"), list) or []
+    outros = [i for i in outros if isinstance(i, dict)]
     if outros:
-        erros = [i for i in outros if i.get("code", "").split(".")[-1].startswith("E")]
+        erros = [i for i in outros
+                 if isinstance(i.get("code"), str) and i.get("code").split(".")[-1].startswith("E")]
         if erros:
             out.append(("medio", f"{len(erros)} erro(s) de configuração de biblioteca no check: "
                                  f"{erros[0].get('code')} — {erros[0].get('message', '')[:90]}"))
 
-    hot = (dig(snap, "git", "hotspots") or [])[:3]
-    if hot:
-        nomes = ", ".join(h["file"] for h in hot)
+    hot = (_seguro(dig(snap, "git", "hotspots"), list) or [])[:3]
+    nomes = _arquivos(hot, limite=3)
+    if nomes:
         out.append(("medio", f"Arquivos de maior atrito: {nomes}. São os que mais consomem tempo por mudança."))
 
     ratio = dig(snap, "db", "cache_hit_ratio")
     if isinstance(ratio, (int, float)) and ratio < 95:
         out.append(("alto", f"Cache hit do Postgres em {ratio}%. Abaixo de 95% normalmente é shared_buffers curto."))
 
-    bloat = dig(snap, "db", "bloat_suspects") or []
-    if bloat:
-        pior = bloat[0]
-        out.append(("medio", f"Tabela {pior['table']} com {pior['dead_pct']}% de linhas mortas. "
+    bloat = _seguro(dig(snap, "db", "bloat_suspects"), list) or []
+    pior = bloat[0] if bloat and isinstance(bloat[0], dict) else None
+    if pior:
+        out.append(("medio", f"Tabela {pior.get('table', '?')} com {pior.get('dead_pct', '?')}% de linhas mortas. "
                              f"Candidata a VACUUM / revisão de autovacuum."))
 
-    seqs = dig(snap, "db", "seq_scan_suspects") or []
+    seqs = _seguro(dig(snap, "db", "seq_scan_suspects"), list) or []
     if seqs:
         out.append(("medio", f"{len(seqs)} tabela(s) grandes sendo lidas por varredura completa. Faltando índice."))
 
-    unused = dig(snap, "db", "unused_indexes") or []
-    if isinstance(unused, list) and unused:
-        total = sum(u.get("bytes", 0) for u in unused)
+    unused = _seguro(dig(snap, "db", "unused_indexes"), list) or []
+    unused = [u for u in unused if isinstance(u, dict)]
+    if unused:
+        total = sum(_seguro(u.get("bytes"), (int, float), 0) for u in unused)
         out.append(("baixo", f"{len(unused)} índice(s) quase nunca usados ocupando {human_bytes(total)}. "
                              f"Cada um custa em toda escrita."))
 
@@ -543,7 +628,10 @@ def findings(snap):
         out.append(("baixo", f"{ruff} violações do {tool}. Vale rodar o autofix "
                              f"antes de olhar uma por uma."))
 
-    for name, msg in (snap.get("errors") or {}).items():
+    # `errors` como lista (nao dict) — snapshot malformado — nao pode
+    # estourar `.items()`; `_seguro` converte em {} e o loop simplesmente
+    # nao acha nada pra reportar.
+    for name, msg in _seguro(snap.get("errors"), dict, {}).items():
         out.append(("info", f"Coletor '{name}' não rodou: {msg}"))
 
     ordem = {"alto": 0, "medio": 1, "baixo": 2, "info": 3}
@@ -567,12 +655,19 @@ def build_veredito(snap):
             f'<li class="{"sim" if ok else "nao" if ok is False else "na"}">{e(rot)}</li>'
             for rot, ok in x["checados"]
         )
+        # letra "NA" = nenhum criterio do eixo pode ser medido (total == 0
+        # em `_nota`). Nao e nota F (reprovado) nem letra nenhuma de verdade
+        # — mostra travessao no lugar da letra e um aviso proprio, com
+        # classe CSS propria (nunca nota-F, que e vermelho).
+        na = x["letra"] == "NA"
         cards.append(
             f'<div class="eixo nota-{x["letra"]}">'
-            f'<div class="letra">{x["letra"]}</div>'
+            f'<div class="letra">{"—" if na else x["letra"]}</div>'
             f'<div class="eixo-corpo"><h3>{e(x["nome"])}</h3>'
             f'<p class="eixo-resumo">{e(x["resumo"])}</p>'
-            f'<ul class="checklist">{checados}</ul></div></div>'
+            + ('<p class="eixo-na">não auditado — nenhum critério deste eixo pôde ser medido</p>'
+               if na else '')
+            + f'<ul class="checklist">{checados}</ul></div></div>'
         )
 
     linhas = "".join(
@@ -595,18 +690,18 @@ def section(title, note, body, ident=None):
 def build_signals(snap, snaps):
     cards = []
 
-    loc = dig(snap, "code", "total_loc")
-    nfiles = dig(snap, "code", "total_files")
-    cards.append(stat("Linhas de código", f"{loc:,}".replace(",", ".") if loc else "—",
-                      sub=f"{nfiles:,} arquivos".replace(",", ".") if nfiles else "",
+    loc = _seguro(dig(snap, "code", "total_loc"), (int, float))
+    nfiles = _seguro(dig(snap, "code", "total_files"), (int, float))
+    cards.append(stat("Linhas de código", milhar(loc) or "—",
+                      sub=f"{milhar(nfiles)} arquivos" if nfiles else "",
                       spark=sparkline(series(snaps, lambda s: dig(s, "code", "total_loc")))))
 
-    cov = dig(snap, "tests", "coverage_pct")
+    cov = _seguro(dig(snap, "tests", "coverage_pct"), (int, float))
     cov_series = series(snaps, lambda s: dig(s, "tests", "coverage_pct"))
-    tone = "" if not isinstance(cov, (int, float)) else ("bad" if cov < 50 else "warn" if cov < 70 else "good")
-    ntests = dig(snap, "tests", "test_count")
-    cards.append(stat("Cobertura", f"{cov}%" if cov is not None else "—",
-                      sub=f"{ntests:,} testes".replace(",", ".") if ntests else "",
+    tone = "" if cov is None else ("bad" if cov < 50 else "warn" if cov < 70 else "good")
+    ntests = _seguro(dig(snap, "tests", "test_count"), (int, float))
+    cards.append(stat("Cobertura", num(cov, "%") if cov is not None else "—",
+                      sub=f"{milhar(ntests)} testes" if ntests else "",
                       spark=sparkline(cov_series),
                       delta_html=delta(cov_series, suffix="pp", atual=cov), tone=tone))
 
@@ -617,32 +712,33 @@ def build_signals(snap, snaps):
                           sub=f"em {num(napps)} apps" if napps else "",
                           spark=sparkline(series(snaps, lambda s: dig(s, "django", "models")))))
     else:
-        mods = dig(snap, "code", "by_app") or []
+        mods = _seguro(dig(snap, "code", "by_app"), list) or []
         deps = dig(snap, "stack", "dependencies")
         cards.append(stat(pluralize_label(snap), len(mods) if mods else "—",
                           sub=("1 dependência" if deps == 1
-                               else f"{deps} dependências" if deps else ""),
+                               else f"{num(deps)} dependências" if deps else ""),
                           spark=sparkline(series(
-                              snaps, lambda s: len(dig(s, "code", "by_app") or []) or None))))
+                              snaps, lambda s: len(_seguro(dig(s, "code", "by_app"), list) or []) or None))))
 
-    size = dig(snap, "db", "size")
-    size_b = size[0]["bytes"] if isinstance(size, list) and size else None
+    size = _seguro(dig(snap, "db", "size"), list)
+    size0 = size[0] if size and isinstance(size[0], dict) else None
+    size_b = size0.get("bytes") if size0 else None
     chr_ = dig(snap, "db", "cache_hit_ratio")
     cards.append(stat("Banco", human_bytes(size_b),
                       sub=f"cache hit {num(chr_)}%" if chr_ else "",
                       spark=sparkline(series(
-                          snaps, lambda s: (dig(s, "db", "size") or [{}])[0].get("bytes")))))
+                          snaps, lambda s: (_seguro(dig(s, "db", "size"), list) or [{}])[0].get("bytes")))))
 
     commits = dig(snap, "git", "commits_30d")
-    nautores = len(dig(snap, "git", "authors_30d") or [])
+    nautores = len(_seguro(dig(snap, "git", "authors_30d"), list) or [])
     cards.append(stat("Commits (30d)", num(commits) if commits is not None else "—",
                       sub=("1 pessoa" if nautores == 1 else f"{nautores} pessoas") if nautores else "",
                       spark=sparkline(series(snaps, lambda s: dig(s, "git", "commits_30d")))))
 
-    ci = dig(snap, "ci", "success_rate")
-    ci_tone = "" if not isinstance(ci, (int, float)) else ("bad" if ci < 70 else "warn" if ci < 85 else "good")
-    avg = dig(snap, "ci", "avg_duration_s")
-    cards.append(stat("CI verde", f"{ci}%" if ci is not None else "—",
+    ci = _seguro(dig(snap, "ci", "success_rate"), (int, float))
+    ci_tone = "" if ci is None else ("bad" if ci < 70 else "warn" if ci < 85 else "good")
+    avg = _seguro(dig(snap, "ci", "avg_duration_s"), (int, float))
+    cards.append(stat("CI verde", num(ci, "%") if ci is not None else "—",
                       sub=f"{avg / 60:.0f} min em média" if avg else "",
                       spark=sparkline(series(snaps, lambda s: dig(s, "ci", "success_rate"))),
                       tone=ci_tone))
@@ -652,12 +748,14 @@ def build_signals(snap, snaps):
 
 def build_coverage(snap):
     rows = []
-    for a in (dig(snap, "tests", "by_app") or [])[:20]:
-        pct = a["coverage_pct"]
-        tone = "bad" if pct < 50 else "warn" if pct < 70 else "good"
-        rows.append([f'<code>{e(a["app"])}</code>', bar(pct, tone),
-                     f'<span class="num">{pct}%</span>',
-                     f'<span class="num dim">{a["statements"]:,}</span>'.replace(",", ".")])
+    for a in (_seguro(dig(snap, "tests", "by_app"), list) or [])[:20]:
+        if not isinstance(a, dict):
+            continue
+        pct = _seguro(a.get("coverage_pct"), (int, float))
+        tone = "bad" if pct is None or pct < 50 else "warn" if pct < 70 else "good"
+        rows.append([f'<code>{e(a.get("app"))}</code>', bar(pct, tone),
+                     f'<span class="num">{num(pct)}%</span>' if pct is not None else '<span class="num">—</span>',
+                     f'<span class="num dim">{milhar(a.get("statements")) or "—"}</span>'])
     return table([module_label(snap), "", "Cobertura", "Linhas medidas"], rows,
                  "nenhum relatório de cobertura encontrado — veja references/linguagens.md "
                  "para o comando do seu stack")
@@ -665,36 +763,38 @@ def build_coverage(snap):
 
 def build_apps(snap):
     rows = []
-    for a in (dig(snap, "code", "by_app") or [])[:20]:
-        ratio = a.get("test_ratio")
+    for a in (_seguro(dig(snap, "code", "by_app"), list) or [])[:20]:
+        if not isinstance(a, dict):
+            continue
+        ratio = _seguro(a.get("test_ratio"), (int, float))
         tone = "bad" if (ratio or 0) < 0.2 else "warn" if (ratio or 0) < 0.5 else "good"
-        rows.append([f'<code>{e(a["app"])}</code>',
-                     f'<span class="num">{a["code"]:,}</span>'.replace(",", "."),
-                     f'<span class="num">{a["tests"]:,}</span>'.replace(",", "."),
-                     f'<span class="num tag {tone}">{ratio if ratio is not None else "—"}</span>'])
+        rows.append([f'<code>{e(a.get("app"))}</code>',
+                     f'<span class="num">{milhar(a.get("code")) or "—"}</span>',
+                     f'<span class="num">{milhar(a.get("tests")) or "—"}</span>',
+                     f'<span class="num tag {tone}">{num(ratio) if ratio is not None else "—"}</span>'])
     return table([module_label(snap), "Linhas", "Linhas de teste", "Razão teste/código"], rows)
 
 
 def build_db(snap):
-    db = snap.get("db") or {}
+    db = _seguro(snap.get("db"), dict, {})
     blocks = []
 
     tables = db.get("tables")
     if isinstance(tables, list):
-        rows = [[f'<code>{e(t["table"])}</code>',
+        rows = [[f'<code>{e(t.get("table"))}</code>',
                  human_bytes(t.get("total_bytes")),
                  human_bytes(t.get("index_bytes")),
-                 f'<span class="num">{(t.get("live_rows") or 0):,}</span>'.replace(",", "."),
-                 f'<span class="num dim">{(t.get("seq_scan") or 0):,}</span>'.replace(",", ".")]
-                for t in tables[:15]]
+                 f'<span class="num">{milhar(t.get("live_rows")) or "0"}</span>',
+                 f'<span class="num dim">{milhar(t.get("seq_scan")) or "0"}</span>']
+                for t in tables[:15] if isinstance(t, dict)]
         blocks.append("<h3>Maiores tabelas</h3>" + table(
             ["Tabela", "Total", "Índices", "Linhas", "Seq scans"], rows))
 
     unused = db.get("unused_indexes")
     if isinstance(unused, list):
-        rows = [[f'<code>{e(u["index"])}</code>', f'<code class="dim">{e(u["table"])}</code>',
+        rows = [[f'<code>{e(u.get("index"))}</code>', f'<code class="dim">{e(u.get("table"))}</code>',
                  human_bytes(u.get("bytes")), f'<span class="num">{num(u.get("idx_scan"))}</span>']
-                for u in unused]
+                for u in unused if isinstance(u, dict)]
         blocks.append("<h3>Índices ociosos</h3>"
                       '<p class="note">Índice pouco lido continua sendo escrito em todo INSERT e UPDATE.</p>'
                       + table(["Índice", "Tabela", "Tamanho", "Leituras"], rows,
@@ -703,10 +803,10 @@ def build_db(snap):
     slow = db.get("slow_queries")
     if isinstance(slow, list) and slow:
         rows = [[f'<code class="sql">{e(q.get("query"))}</code>',
-                 f'<span class="num">{(q.get("calls") or 0):,}</span>'.replace(",", "."),
+                 f'<span class="num">{milhar(q.get("calls")) or "0"}</span>',
                  f'<span class="num">{num(q.get("mean_ms"), " ms")}</span>',
                  f'<span class="num">{num(q.get("total_s"), " s")}</span>']
-                for q in slow]
+                for q in slow if isinstance(q, dict)]
         blocks.append("<h3>Queries por tempo total</h3>" + table(
             ["Query", "Chamadas", "Média", "Total"], rows))
     elif isinstance(slow, dict):
@@ -717,9 +817,11 @@ def build_db(snap):
 
 
 def build_infra(snap):
-    conts = dig(snap, "infra", "containers") or []
+    conts = _seguro(dig(snap, "infra", "containers"), list) or []
     rows = []
     for c in conts:
+        if not isinstance(c, dict):
+            continue
         estado = c.get("state") or ""
         tone = "good" if estado == "running" else "warn"
         rows.append([f'<code>{e(c.get("name"))}</code>',
@@ -735,10 +837,13 @@ def build_infra(snap):
 
 def build_ci(snap):
     rows = []
-    for r in dig(snap, "ci", "recent") or []:
+    for r in _seguro(dig(snap, "ci", "recent"), list) or []:
+        if not isinstance(r, dict):
+            continue
         conc = r.get("conclusion") or "em execução"
         tone = "good" if conc == "success" else "bad" if conc == "failure" else ""
-        dur = f'{r["duration_s"] / 60:.1f} min' if r.get("duration_s") else "—"
+        dur_s = _seguro(r.get("duration_s"), (int, float))
+        dur = f'{dur_s / 60:.1f} min' if dur_s else "—"
         rows.append([f'<span class="tag {tone}">{e(conc)}</span>',
                      e(r.get("workflow")), f'<code class="dim">{e(r.get("branch"))}</code>',
                      e(r.get("title")), f'<span class="num">{dur}</span>'])
@@ -748,20 +853,26 @@ def build_ci(snap):
 
 def build_quality(snap):
     blocks = []
-    worst = dig(snap, "quality", "complexity", "worst") or []
+    worst = _seguro(dig(snap, "quality", "complexity", "worst"), list) or []
+    worst = [b for b in worst if isinstance(b, dict)]
     if worst:
-        rows = [[f'<code>{e(b["file"])}</code>', f'<code class="dim">{e(b["name"])}</code>',
-                 f'<span class="num tag {"bad" if b["complexity"] > 15 else "warn"}">{num(b["complexity"])}</span>',
+        rows = [[f'<code>{e(b.get("file"))}</code>', f'<code class="dim">{e(b.get("name"))}</code>',
+                 f'<span class="num tag '
+                 f'{"bad" if _seguro(b.get("complexity"), (int, float), 0) > 15 else "warn"}">'
+                 f'{num(b.get("complexity"))}</span>',
                  f'<span class="num dim">linha {num(b.get("line"))}</span>']
                 for b in worst[:12]]
         blocks.append("<h3>Funções mais complexas</h3>" + table(
             ["Arquivo", "Função", "Complexidade", ""], rows))
 
-    rules = dig(snap, "quality", "ruff", "by_rule") or []
+    rules = _seguro(dig(snap, "quality", "ruff", "by_rule"), list) or []
+    rules = [r for r in rules if isinstance(r, dict)
+             and isinstance(_seguro(r.get("count"), (int, float)), (int, float))]
     if rules:
-        rows = [[f'<code>{e(r["rule"])}</code>',
-                 bar(100 * r["count"] / max(rules[0]["count"], 1)),
-                 f'<span class="num">{r["count"]}</span>'] for r in rules]
+        maior = max(_seguro(r.get("count"), (int, float), 0) for r in rules) or 1
+        rows = [[f'<code>{e(r.get("rule"))}</code>',
+                 bar(100 * r.get("count") / maior),
+                 f'<span class="num">{num(r.get("count"))}</span>'] for r in rules]
         blocks.append("<h3>Violações do ruff por regra</h3>" + table(
             ["Regra", "", "Ocorrências"], rows))
 
@@ -813,9 +924,12 @@ h3{font-size:13px;font-weight:700;letter-spacing:-.01em;margin:28px 0 8px}
 .nota-A .letra,.nota-B .letra{color:var(--good)}
 .nota-C .letra{color:var(--warn)}
 .nota-D .letra,.nota-F .letra{color:var(--bad)}
+.nota-NA .letra{color:var(--soft)}
 .eixo h3{margin:0 0 3px;font-size:12.5px}
 .eixo-resumo{font-size:11.5px;color:var(--soft);font-family:var(--mono);margin:0 0 8px;
              line-height:1.5}
+.eixo-na{font-size:11px;color:var(--soft);font-family:var(--mono);margin:0 0 8px;
+         font-style:italic}
 .checklist{list-style:none;padding:0;margin:0;font-size:11.5px;line-height:1.75}
 .checklist li{color:var(--soft);padding-left:17px;position:relative}
 .checklist li::before{position:absolute;left:0;font-family:var(--mono)}
@@ -909,7 +1023,12 @@ def render(snaps):
     when = snap.get("generated_at", "")
     try:
         when_fmt = datetime.fromisoformat(when).strftime("%d/%m/%Y às %H:%M")
-    except ValueError:
+    except (ValueError, TypeError):
+        # ValueError = string mas formato invalido. TypeError = nem string
+        # (None, numero, lista...) — `fromisoformat` so aceita str, e
+        # `generated_at: null` no JSON (coletor que falhou) e exatamente
+        # isso. Os dois casos caem pro mesmo fallback: mostra o valor cru
+        # (via `e()` mais na frente, que aceita qualquer tipo).
         when_fmt = when
 
     fnd = findings(snap)
@@ -928,9 +1047,9 @@ def render(snaps):
     age = dig(snap, "git", "age_days")
     if age:
         meta.append(f'<span>repo com <b>{num(age)}</b> dias</span>')
-    stack = dig(snap, "stack", "detected") or []
+    stack = _seguro(dig(snap, "stack", "detected"), list) or []
     if stack:
-        meta.append(f'<span>stack <b>{e(" · ".join(stack[:4]))}</b></span>')
+        meta.append(f'<span>stack <b>{e(" · ".join(str(s) for s in stack[:4]))}</b></span>')
 
     body = [
         '<div class="wrap">',
@@ -963,7 +1082,7 @@ def render(snaps):
         section("Infraestrutura", "", build_infra(snap)),
         section("Integração contínua", "", build_ci(snap)),
         f'<footer>Ruch-X · {e(when_fmt)} · '
-        f'coletores: {e(", ".join(snap.get("collectors_run") or []))}</footer>',
+        f'coletores: {e(", ".join(str(c) for c in (_seguro(snap.get("collectors_run"), list) or [])))}</footer>',
         '</div>',
     ]
 
@@ -995,11 +1114,22 @@ def main():
         raise SystemExit(f"nenhum snapshot em {dirpath}/ — rode collect.py primeiro")
 
     out = Path(args.out or Path(dirpath) / "dashboard.html")
-    # git versiona symlink de diretorio: um `.ruch-x -> ../alvo` no repositorio
-    # faria o dashboard ser escrito fora dele (e `--open` abriria esse).
-    if not args.out and Path(dirpath).is_symlink():
-        raise SystemExit(f"{dirpath} e um symlink — recusando escrever fora do "
-                         f"repositorio. Use --out para escolher o destino.")
+    if not args.out:
+        # git versiona symlink de diretorio OU de arquivo: um `.ruch-x ->
+        # ../alvo` (pasta) faria o dashboard ser escrito fora do repositorio;
+        # um `.ruch-x/dashboard.html -> ../../alvo` (SO o arquivo final e o
+        # link) e mais sutil — a pasta e real, so o destino da escrita e que
+        # segue o link, `write_text()` segue transparente e sobrescreve o
+        # que estiver do outro lado, exit 0, silencioso. Os dois casos: a
+        # pasta e symlink, OU o arquivo final e symlink, OU o caminho
+        # resolvido cai fora do diretorio de snapshots. `--out` explicito
+        # continua sendo o jeito de escolher outro destino de proposito —
+        # nenhuma dessas checagens roda quando o Wilkerson pediu por fora.
+        dirpath_p = Path(dirpath)
+        if dirpath_p.is_symlink() or out.is_symlink() or not _dentro_de(out, dirpath_p):
+            raise SystemExit(f"{out} escaparia de {dirpath}/ (symlink no caminho) — "
+                             f"recusando escrever fora do repositorio. Use --out "
+                             f"para escolher o destino.")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render(snaps), encoding="utf-8")
     print(str(out.resolve()))

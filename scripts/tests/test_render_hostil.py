@@ -8,9 +8,12 @@ de JSON escrito por outra pessoa.
 from __future__ import annotations
 
 import json
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from _fake_repo import fake_repo  # noqa: F401  (garante o sys.path dos scripts)
 
@@ -172,6 +175,260 @@ class TestSiblingWorkflowsNaoMedido(unittest.TestCase):
         checklist = dict(eixos["Segurança"]["checados"])
         self.assertTrue(checklist["actions com versão fixada"])
         self.assertTrue(checklist["workflows com permissions declarado"])
+
+
+# ----------------------------------------------------------------------
+# Fix round 1: achados da revisao externa (2 Critical, 3 Important, 2 Minor)
+# ----------------------------------------------------------------------
+
+class TestCritical1DependenciasXSS(unittest.TestCase):
+    """render.py `build_signals`, ramo `else` de `if models:` (repo
+    nao-Django — a MAIORIA dos repos numa ferramenta multi-linguagem):
+    `stack.dependencies` era interpolado cru dentro de `<span
+    class="stat-sub">`, sem `e()` nem `num()`. Payload executavel provado
+    ponta a ponta antes do fix (`grep -c "<script"` = 1 no HTML gerado)."""
+
+    def test_stack_dependencies_nao_injeta_script(self):
+        snap = _snap(stack={"dependencies": PAYLOAD})  # sem "django" -> ramo else
+        html = render.render([snap])
+        self.assertNotIn("<script>fetch", html)
+
+    def test_stack_dependencies_numero_normal_continua_mostrando(self):
+        """Mutacao inversa: garante que o fix nao quebrou o caso feliz."""
+        snap = _snap(stack={"dependencies": 7})
+        html = render.render([snap])
+        self.assertIn("7 dependências", html)
+
+
+class TestCritical2SymlinkGuard(unittest.TestCase):
+    """render.py `main()`: o guard so testava `Path(dirpath).is_symlink()`
+    (pasta). Com `.ruch-x` sendo uma pasta REAL mas `.ruch-x/dashboard.html`
+    sendo um symlink versionado apontando pra fora, `out.write_text()`
+    seguia o link e escrevia FORA do repositorio, exit 0, silencioso — e
+    `--open` abriria esse arquivo externo. Cobre os DOIS casos: pasta-symlink
+    e arquivo-symlink (o segundo e o que furava o guard anterior)."""
+
+    def _rodar_main_em(self, projeto):
+        cwd = os.getcwd()
+        os.chdir(projeto)
+        try:
+            with mock.patch.object(sys, "argv", ["render.py"]):
+                with self.assertRaises(SystemExit):
+                    render.main()
+        finally:
+            os.chdir(cwd)
+
+    def test_pasta_de_snapshots_symlink_e_recusada(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fora = Path(tmp, "fora")
+            fora.mkdir()
+            (fora / "2026-01-01.json").write_text(json.dumps(_snap()), encoding="utf-8")
+            projeto = Path(tmp, "projeto")
+            projeto.mkdir()
+            (projeto / ".ruch-x").symlink_to(fora, target_is_directory=True)
+
+            self._rodar_main_em(projeto)
+            self.assertFalse((fora / "dashboard.html").exists(),
+                              "nada pode ter sido escrito do lado de fora do repositorio")
+
+    def test_arquivo_dashboard_symlink_e_recusado(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            alvo_externo = Path(tmp, "evil.html")
+            projeto = Path(tmp, "projeto")
+            projeto.mkdir()
+            snapdir = projeto / ".ruch-x"
+            snapdir.mkdir()
+            (snapdir / "2026-01-01.json").write_text(json.dumps(_snap()), encoding="utf-8")
+            (snapdir / "dashboard.html").symlink_to(alvo_externo)
+
+            self._rodar_main_em(projeto)
+            self.assertFalse(alvo_externo.exists(),
+                              "o arquivo do outro lado do symlink nao pode ter sido criado/escrito")
+
+    def test_caso_normal_sem_symlink_continua_escrevendo(self):
+        """Mutacao inversa: garante que o guard nao bloqueou o caminho feliz."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projeto = Path(tmp, "projeto")
+            projeto.mkdir()
+            snapdir = projeto / ".ruch-x"
+            snapdir.mkdir()
+            (snapdir / "2026-01-01.json").write_text(json.dumps(_snap()), encoding="utf-8")
+
+            cwd = os.getcwd()
+            os.chdir(projeto)
+            try:
+                with mock.patch.object(sys, "argv", ["render.py"]):
+                    render.main()  # nao deve lancar SystemExit
+            finally:
+                os.chdir(cwd)
+            self.assertTrue((snapdir / "dashboard.html").exists())
+
+
+class TestImportant3NotaSemMedicao(unittest.TestCase):
+    """`_nota(0, 0)` devolvia `(0, "F")` — eixo sem NENHUM criterio medido
+    (ex.: coletor `governance` inteiro caiu, nada mais no snapshot) virava
+    reprovacao FALSA, o mesmo pecado do achado parqueado na direcao oposta
+    (nao medir nao pode punir, tampouco premiar)."""
+
+    def test_nota_zero_sobre_zero_nao_e_F(self):
+        letra_direta = render._nota(0, 0)[1]
+        self.assertNotEqual(letra_direta, "F")
+        self.assertEqual(letra_direta, "NA")
+        self.assertIsNone(render._nota(0, 0)[0])
+
+    def test_eixo_sem_criterio_medido_nao_vira_F_no_html(self):
+        # fixture do proprio review: so o coletor governance falhou, resto
+        # do snapshot ausente -> eixo Seguranca fica com total==0.
+        snap = _snap(errors={"governance": "boom: falha inesperada"})
+        eixos = {x["nome"]: x for x in render.auditoria(snap)[0]}
+        seg = eixos["Segurança"]
+        self.assertEqual(seg["letra"], "NA")
+        self.assertIsNone(seg["pct"])
+        html = render.render([snap])
+        # o card do eixo Seguranca especificamente nao pode usar a classe
+        # nota-F (vermelha, "reprovado") nem mostrar a letra F.
+        self.assertNotIn('<div class="eixo nota-F"><div class="letra">F</div>'
+                          '<div class="eixo-corpo"><h3>Segurança</h3>', html)
+        self.assertIn('class="eixo nota-NA"', html)
+        self.assertIn("não auditado — nenhum critério deste eixo pôde ser medido", html)
+
+
+class TestImportant4GeneratedAtMalformado(unittest.TestCase):
+    """`datetime.fromisoformat` so aceita string — `generated_at: null`
+    (coletor que falhou, nao hostilidade) ou qualquer tipo nao-string
+    levanta TypeError, nao capturado antes (so ValueError). Step 5 desta
+    mesma task coagiu a chave de ordenacao do `load_snapshots` pra string,
+    entao um `generated_at` malformado agora SOBREVIVE ao load e chegava
+    vivo no render — onde crashava."""
+
+    def test_generated_at_none_nao_derruba_render(self):
+        snap = _snap(generated_at=None)
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_generated_at_numero_nao_derruba_render(self):
+        snap = _snap(generated_at=20260813)
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_generated_at_lista_nao_derruba_render(self):
+        snap = _snap(generated_at=["nao", "e", "data"])
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+
+class TestImportant5ClassesDeLixo(unittest.TestCase):
+    """Guard obrigatorio: um snapshot com TODAS as classes de lixo listadas
+    pela revisao numa carga so — tem que produzir HTML (nunca traceback) e
+    nao pode conter `<script` em lugar nenhum. Isola tambem cada classe em
+    teste proprio pros casos mais especificos, pra apontar exatamente o que
+    quebrou se este guard falhar de novo."""
+
+    def _snapshot_lixo_total(self):
+        return _snap(
+            generated_at=None,
+            collectors_run=[1, 2, "git"],
+            errors=["nao e dict"],
+            git={
+                "branch": "main", "commit": "abc123",
+                "age_days": PAYLOAD, "commits_30d": PAYLOAD,
+                "authors_30d": "nao e lista",
+                "hotspots": [
+                    {"churn": 5, "complexity": 20, "loc": -999, "file": PAYLOAD},
+                    {"churn": 3, "complexity": 8},  # sem "file"
+                    "nao e dict",
+                    {"churn": "abc", "complexity": 9, "file": "x.py", "loc": 10},
+                ],
+            },
+            django={
+                "models": PAYLOAD, "apps": PAYLOAD,
+                "deploy_issues": "nao e lista",
+                "pending_migrations": {"nao": "lista"},
+                "ambiente_de_producao": True,
+            },
+            db="nao e dict",
+            governance="nao e dict",
+            quality={
+                "complexity": {
+                    "above_10": "abc", "blocks_analyzed": "abc",
+                    "worst": [{"complexity": 99, "line": PAYLOAD}, "nao e dict",
+                              {"file": "a.py", "name": "f", "complexity": PAYLOAD, "line": 1}],
+                },
+                "ruff": {"by_rule": [{"rule": "E501"}, "nao e dict",
+                                     {"rule": "F401", "count": PAYLOAD}]},
+            },
+            tests={
+                "coverage_pct": PAYLOAD, "coverage_age_days": PAYLOAD, "test_count": PAYLOAD,
+                "by_app": [{"coverage_pct": PAYLOAD, "statements": PAYLOAD}, "nao e dict",
+                          {"app": "x"}],
+            },
+            code={
+                "total_loc": PAYLOAD, "total_files": PAYLOAD,
+                "by_app": [{"app": "x", "code": PAYLOAD, "tests": PAYLOAD, "test_ratio": PAYLOAD},
+                          "nao e dict"],
+            },
+            stack={"detected": [1, 2, PAYLOAD], "dependencies": PAYLOAD},
+            ci={
+                "success_rate": PAYLOAD, "avg_duration_s": PAYLOAD,
+                "recent": [{"duration_s": PAYLOAD}, "nao e dict"],
+            },
+            infra={"containers": [{"cpu": PAYLOAD}, "nao e dict"], "host": PAYLOAD},
+        )
+
+    def test_carga_total_produz_html_sem_traceback_e_sem_script(self):
+        snap = self._snapshot_lixo_total()
+        html = render.render([snap])  # nao pode levantar excecao
+        self.assertIn("<html", html)
+        self.assertNotIn("<script>fetch", html)
+
+    def test_hotspots_loc_negativo_nao_vira_complex(self):
+        snap = _snap(git={"hotspots": [
+            {"churn": 5, "complexity": 10, "loc": -50, "file": "a.py"},
+            {"churn": 3, "complexity": 8, "loc": -1, "file": "b.py"},
+            {"churn": 9, "complexity": 30, "loc": -2, "file": "c.py"},
+        ]})
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_governance_como_string_nao_estoura_get(self):
+        snap = _snap(governance="nao e dict")
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_db_como_string_nao_estoura_get(self):
+        snap = _snap(db="nao e dict")
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_errors_como_lista_nao_estoura_items(self):
+        snap = _snap(errors=["nao e dict"])
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_hotspots_sem_file_nao_da_keyerror(self):
+        snap = _snap(git={"hotspots": [
+            {"churn": 5, "complexity": 10, "loc": 5},
+            {"churn": 3, "complexity": 8, "loc": 5},
+            {"churn": 9, "complexity": 30, "loc": 5},
+        ]})
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_segredos_sem_file_nao_da_keyerror(self):
+        snap = _snap(governance={"segredos_commitados": [{"kind": "token"}],
+                                 "workflows": {}, "dependencias": {}})
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_by_app_sem_campo_nao_da_keyerror(self):
+        snap = _snap(tests={"by_app": [{}]})
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_db_size_lista_de_nao_dicts_nao_estoura(self):
+        snap = _snap(db={"size": ["nao e dict", 123]})
+        html = render.render([snap])
+        self.assertIn("<html", html)
 
 
 if __name__ == "__main__":
