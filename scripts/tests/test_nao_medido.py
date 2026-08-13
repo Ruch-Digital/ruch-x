@@ -186,6 +186,27 @@ class TestSeguranca(unittest.TestCase):
         self.assertIsNone(out["protegido"])
         self.assertTrue(out.get("motivo"))
 
+    def test_404_embutido_em_numero_maior_nao_vira_branch_desprotegida(self):
+        """"404" solto dentro de outro numero (epoch, id) nao e o HTTP 404.
+
+        Sem ancora de palavra no regex, `re.search(r"404|not found", se)`
+        casa em qualquer substring — inclusive "404" no meio de
+        "1754049600" (epoch de reset de rate limit). Isso reintroduz
+        "acusar sem ter olhado" pelo lado do match POSITIVO frouxo, em vez
+        de pelo lado do "qualquer falha vira desprotegida" (o bug original).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(
+                     collect, "run",
+                     side_effect=self._fake_run_branch_protection(
+                         1, "API rate limit exceeded; resets at 1754049600")):
+                out = collect._branch_protection(root)
+        self.assertFalse(out["disponivel"])
+        self.assertIsNone(out["protegido"])
+        self.assertTrue(out.get("motivo"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1217,8 +1217,11 @@ def _branch_protection(root):
     if rc != 0:
         # 404 e a resposta que INTERESSA: a branch nao tem protecao. Qualquer
         # outra falha (403 sem permissao, rate limit, rede) nao autoriza dizer
-        # "desprotegida" — isso seria acusar sem ter olhado.
-        if re.search(r"404|not found", se or "", re.I):
+        # "desprotegida" — isso seria acusar sem ter olhado. O padrao casa SO
+        # a forma real da resposta do gh ("gh: Not Found (HTTP 404)"), com
+        # ancora de palavra: "404" solto dentro de outro numero (epoch, id de
+        # request) nao pode virar "404 confirmado".
+        if re.search(r"\bnot found\b|\bhttp\s?404\b", se or "", re.I):
             return out
         out["disponivel"] = False
         out["motivo"] = _motivo(rc, se)
