@@ -113,7 +113,11 @@ def collect_code(root, cfg):
            "by_language": [], "by_app": [], "comment_ratio": None}
 
     if has("scc"):
-        rc, so, _ = run(["scc", "--format", "json", "--no-cocomo", str(root)])
+        rc, so, se = run(["scc", "--format", "json", "--no-cocomo", str(root)])
+        if rc != 0 or not so.strip():
+            # scc instalado que falha nao pode virar "projeto com 0 linhas".
+            nao_medido(out, "total_loc", _motivo(rc, se))
+            nao_medido(out, "total_files", _motivo(rc, se))
         if rc == 0 and so.strip():
             data = json.loads(so)
             out["tool"] = "scc"
@@ -376,6 +380,7 @@ def collect_quality(root, cfg):
                 "avg": round(sum(scores) / len(scores), 2) if scores else 0,
                 "above_10": sum(1 for s in scores if s > 10),
                 "worst": blocks[:15],
+                "metodo": "radon",
             }
         except json.JSONDecodeError:
             pass
@@ -502,7 +507,8 @@ def coverage_by_module_py(data):
 def collect_tests(root, cfg):
     """Le o relatorio de cobertura em qualquer formato; roda pytest se pedido."""
     out = {"coverage_pct": None, "by_app": [], "test_count": None,
-           "duration_s": None, "slowest": [], "source": None}
+           "duration_s": None, "slowest": [], "source": None,
+           "coverage_age_days": None}
 
     cov_path = Path(root) / cfg.get("coverage_json", "coverage.json")
     run_tests = cfg.get("run_tests", False)
@@ -523,17 +529,31 @@ def collect_tests(root, cfg):
             if m:
                 out["slowest"].append({"duration_s": float(m.group(1)), "test": m.group(3)})
 
+    def _idade(rel_path):
+        """Ha quanto tempo o relatorio de cobertura foi gerado.
+
+        A coleta le o arquivo que estiver no disco. Sem a idade, cobertura
+        de tres meses atras entra no painel como se fosse de hoje.
+        """
+        try:
+            mtime = (Path(root) / rel_path).stat().st_mtime
+        except OSError:
+            return None
+        return int((datetime.now().timestamp() - mtime) / 86400)
+
     found = parse_coverage(root, cfg)
     if found:
         out["coverage_pct"] = found["pct"]
         out["source"] = found["source"]
         out["by_app"] = found.get("by_app", [])
+        out["coverage_age_days"] = _idade(found["source"])
         return out
 
     if cov_path.exists():
         try:
             data = json.loads(cov_path.read_text(encoding="utf-8"))
             out["source"] = out["source"] or "coverage.json"
+            out["coverage_age_days"] = _idade(cfg.get("coverage_json", "coverage.json"))
             out["coverage_pct"] = round(data.get("totals", {}).get("percent_covered", 0), 1)
             per_app = defaultdict(lambda: {"statements": 0, "missing": 0})
             for fname, fdata in data.get("files", {}).items():
@@ -799,17 +819,20 @@ def hotspots(root, cfg):
         except OSError:
             continue
         cx = per_file.get(path)
+        metodo = "radon"
         if cx is None:
             # Fora do Python nao ha radon. Contar ramificacoes eh uma
             # aproximacao grosseira, mas serve pro que o mapa precisa:
             # ordenar arquivos entre si, nao produzir um numero absoluto.
+            # O rotulo vai junto pro painel nao passar heuristica por medicao.
+            metodo = "heuristica"
             try:
                 src = f.read_text(encoding="utf-8", errors="ignore")
                 cx = len(re.findall(BRANCH_WORDS, src))
             except OSError:
                 cx = 0
         rows.append({"file": path, "churn": times, "complexity": cx, "loc": loc,
-                     "score": times * cx})
+                     "score": times * cx, "metodo": metodo})
     rows.sort(key=lambda x: -x["score"])
     return rows[:40]
 

@@ -208,5 +208,85 @@ class TestSeguranca(unittest.TestCase):
         self.assertTrue(out.get("motivo"))
 
 
+class TestCobertura(unittest.TestCase):
+
+    def test_cobertura_declara_idade_do_arquivo_lido(self):
+        """Cobertura de 3 meses atras nao pode ser reportada como o estado de hoje."""
+        import os
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{
+                "coverage.json": json.dumps({"totals": {"percent_covered": 42.0}}),
+            })
+            velho = time.time() - 90 * 86400
+            os.utime(root / "coverage.json", (velho, velho))
+            out = collect.collect_tests(root, {})
+        self.assertEqual(out["coverage_pct"], 42.0)
+        self.assertIsNotNone(out["coverage_age_days"])
+        self.assertGreaterEqual(out["coverage_age_days"], 89)
+
+
+class TestComplexidade(unittest.TestCase):
+
+    def test_complexidade_declara_o_metodo(self):
+        """Sem radon o numero vem de contagem de ramificacao — o painel tem que dizer."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.js": "if (a) { b(); } else { c(); }\n"})
+            out = collect.collect_quality(root, {})
+        if out["complexity"] is not None:
+            self.assertIn(out["complexity"].get("metodo"), ("radon", "heuristica"))
+
+    @unittest.skipUnless(shutil.which("git"), "git ausente")
+    def test_hotspots_sem_radon_marca_metodo_heuristica(self):
+        """Forca o caminho da heuristica (radon falhando) num repo git real,
+        pra nao depender do radon estar ou nao instalado na maquina que roda
+        a suite. Cada linha do mapa tem que dizer de onde veio o numero."""
+        original_run = collect.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if "radon" in cmd:
+                return 1, "", "radon nao encontrado"
+            return original_run(cmd, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = TestGit._repo_git_real(tmp, **{
+                "app.js": "if (a) { b(); } else if (c) { d(); } else { e(); }\n",
+            })
+            with mock.patch.object(collect, "run", side_effect=fake_run):
+                rows = collect.hotspots(root, {})
+
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["metodo"], "heuristica")
+
+
+class TestContagemCodigo(unittest.TestCase):
+
+    def test_sem_scc_nem_cloc_o_contador_proprio_ainda_mede(self):
+        """Se o scc nao existir na maquina, o fallback e o unico caminho que
+        mede alguma coisa — ele nao pode ficar inalcancavel."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "a = 1\nb = 2\nc = 3\n"})
+            with mock.patch.object(collect, "has", return_value=False):
+                out = collect.collect_code(root, {})
+        self.assertEqual(out["tool"], "builtin")
+        self.assertIsNotNone(out["total_loc"])
+        self.assertGreater(out["total_loc"], 0)
+
+    def test_scc_instalado_que_falha_nao_vira_projeto_com_zero_linhas(self):
+        """scc presente mas quebrado (crash, rc != 0) nao e um projeto vazio —
+        e uma medicao que nao aconteceu."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "a = 1\n"})
+            with mock.patch.object(collect, "has", side_effect=lambda b: b == "scc"), \
+                 mock.patch.object(collect, "run",
+                                    return_value=(1, "", "scc: panic: runtime error")):
+                out = collect.collect_code(root, {})
+        self.assertIsNone(out["total_loc"])
+        self.assertIn("total_loc", out.get("nao_medido", {}))
+        self.assertIsNone(out["total_files"])
+        self.assertIn("total_files", out.get("nao_medido", {}))
+
+
 if __name__ == "__main__":
     unittest.main()
