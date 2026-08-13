@@ -1228,12 +1228,88 @@ def collect_infra(root, cfg):
 # ci: github actions via gh cli
 # --------------------------------------------------------------------------
 
+# Quantos runs cancelados, no maximo, o coletor investiga a fundo (1 chamada
+# `gh run view` cada). Cancelamento costuma ser raro numa janela de 40 runs;
+# o limite existe pra um projeto com cancelamento em massa (ex: todo PR de um
+# dia cancelado por um push seguinte) nao multiplicar chamadas de API.
+LIMITE_CANCELADOS_CHECADOS = 8
+
+# `_e_deploy()` foi desenhada pra nome de WORKFLOW, onde "deploy" no nome
+# quase sempre significa que o workflow FAZ o deploy. Reaplicada sobre nome
+# de JOB isso quebra: um job de PORTAO decide SE o deploy roda, nao faz o
+# deploy — e o proprio ion tem um chamado "Checks rapidos (gate de deploy)".
+# Sem esta lista, aquele job (cancelado ou nao, tanto faz — o que importa
+# aqui e o CONCLUIDO com sucesso) casava com "deploy" e virava uma afirmacao
+# categorica de que algo foi implantado, quando o job nem chegou perto disso.
+# Nome com qualquer uma destas palavras VENCE "deploy" no mesmo nome — falso
+# negativo aqui (nao contar um deploy de verdade com nome ambiguo) e mais
+# barato que falso positivo (afirmar deploy que nao aconteceu).
+PALAVRAS_DE_PORTAO_NO_JOB = ("gate", "check", "checks", "lint", "test")
+
+
+def _job_parece_deploy(nome_job, cfg):
+    """Nome de job que sugere ter EXECUTADO o deploy — nao so decidido se ele
+    roda. Ver `PALAVRAS_DE_PORTAO_NO_JOB`: um job "Checks rapidos (gate de
+    deploy)" nao pode contar so por ter "deploy" no nome; um job "Deploy
+    staging (webhooks Coolify)" continua contando normalmente.
+    """
+    nome = (nome_job or "").lower()
+    if any(palavra in nome for palavra in PALAVRAS_DE_PORTAO_NO_JOB):
+        return False
+    return _e_deploy(nome_job, cfg)
+
+
+def _job_de_deploy_bem_sucedido(root, run_id, cfg):
+    """True se o run cancelado teve algum JOB concluido com SUCESSO cujo nome
+    sugere deploy — o caso mais caro de "CI verde ignorando cancelamento": o
+    job que roda a suite foi cancelado, mas o job que sobe pra producao, no
+    MESMO run, ja tinha terminado bem antes disso. `None` quando nao foi
+    possivel checar (gh falhou, timeout, saida ilegivel) — nunca vira "nao
+    tinha deploy" por engano.
+
+    O nome do job e SINAL, nao prova: `success` e medido, "e um job de
+    deploy" e inferido do nome (ver `_job_parece_deploy`). Quem le o achado
+    precisa do mesmo hedge — texto em `render.py`.
+    """
+    if not run_id:
+        return None
+    rc, so, _ = run(["gh", "run", "view", str(run_id), "--json", "jobs"], cwd=root, timeout=30)
+    if rc != 0 or not so.strip():
+        return None
+    try:
+        data = json.loads(so)
+    except json.JSONDecodeError:
+        return None
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, list):
+        return None
+    return any(
+        isinstance(j, dict) and j.get("conclusion") == "success"
+        and _job_parece_deploy(j.get("name"), cfg)
+        for j in jobs
+    )
+
+
+def _cancelados_com_deploy_ok(root, cancelados, cfg):
+    """Dos runs cancelados, quais tinham um job de deploy ja bem-sucedido.
+
+    Best-effort: cada checagem que nao conseguir responder (`None`) e
+    simplesmente omitida da lista — ela nunca vira falso "nao tinha".
+    """
+    achados = []
+    for r in cancelados[:LIMITE_CANCELADOS_CHECADOS]:
+        if _job_de_deploy_bem_sucedido(root, r.get("run_id"), cfg):
+            achados.append({"workflow": r.get("workflow"), "title": r.get("title"),
+                            "run_id": r.get("run_id")})
+    return achados
+
+
 def collect_ci(root, cfg):
     if not has("gh"):
         raise RuntimeError("gh cli nao encontrado (brew/apt install gh, depois gh auth login)")
 
     limit = cfg.get("ci", {}).get("limit", 40)
-    fields = "conclusion,createdAt,updatedAt,displayTitle,workflowName,headBranch,event"
+    fields = "conclusion,createdAt,updatedAt,displayTitle,workflowName,headBranch,event,databaseId"
     rc, so, se = run(["gh", "run", "list", "--limit", str(limit), "--json", fields], cwd=root)
     if rc != 0:
         raise RuntimeError(se.strip()[:200] or "gh run list falhou")
@@ -1250,13 +1326,23 @@ def collect_ci(root, cfg):
             pass
         parsed.append({"workflow": r.get("workflowName"), "conclusion": r.get("conclusion"),
                        "branch": r.get("headBranch"), "title": (r.get("displayTitle") or "")[:80],
-                       "created_at": r.get("createdAt"), "duration_s": dur})
+                       "created_at": r.get("createdAt"), "duration_s": dur,
+                       "run_id": r.get("databaseId")})
 
+    # A taxa continua sendo sucesso sobre CONCLUIDO (sucesso+falha) — cancelar
+    # nao e falhar, as vezes e run substituido por um push seguinte. O que
+    # faltava e nao jogar o cancelamento fora: um run cancelado nao confirma
+    # pipeline verde, e esconder isso deixa "CI verde 100%" cobrir um caso onde
+    # ninguem sabe se a suite passou (medido: job de teste cancelado aos 26
+    # min, job de deploy do MESMO run subiu pro staging do mesmo jeito).
     done = [r for r in parsed if r["conclusion"] in ("success", "failure")]
+    cancelados = [r for r in parsed if r["conclusion"] == "cancelled"]
     durs = [r["duration_s"] for r in done if r["duration_s"]]
     return {
         "runs_analyzed": len(parsed),
         "success_rate": round(100 * sum(1 for r in done if r["conclusion"] == "success") / len(done), 1) if done else None,
+        "cancelados": len(cancelados),
+        "cancelados_com_deploy_ok": _cancelados_com_deploy_ok(root, cancelados, cfg),
         "avg_duration_s": round(sum(durs) / len(durs), 1) if durs else None,
         "max_duration_s": max(durs) if durs else None,
         "recent": parsed[:15],
@@ -1419,7 +1505,8 @@ def _analisa_workflows(root):
     `permissions` herda o token com escopo amplo demais.
     """
     wdir = Path(root) / ".github" / "workflows"
-    out = {"count": 0, "sem_pin": [], "sem_permissions": [], "arquivos": []}
+    out = {"count": 0, "sem_pin": [], "sem_permissions": [], "permissions_no_job": [],
+           "arquivos": []}
     if not wdir.is_dir():
         return out
     for f in sorted(list(wdir.glob("*.yml")) + list(wdir.glob("*.yaml"))):
@@ -1435,6 +1522,16 @@ def _analisa_workflows(root):
         # problema (dizia 1 workflow exposto quando eram 3; achado do 1o uso).
         if not re.search(r"^permissions\s*:", texto, re.M):
             out["sem_permissions"].append(f.name)
+            # Sem bloco no TOPO o workflow ainda entra em `sem_permissions`
+            # (o que protege TODOS os jobs e o bloco raiz — isso nao muda).
+            # Mas um `permissions:` indentado (dentro de um job) restringe
+            # AQUELE job especifico — achado do 2o uso real: 2 dos 3
+            # workflows "sem permissions" ja tinham o job que publica no
+            # registro de pacotes limitado a `packages: write`. Registrar
+            # separado pra o achado poder dizer isso, sem mudar o criterio
+            # (que continua sendo o bloco no topo).
+            if re.search(r"^[ \t]+permissions\s*:", texto, re.M):
+                out["permissions_no_job"].append(f.name)
         for m in re.finditer(r"uses:\s*([\w.-]+/[\w.-]+)@([\w.\-/]+)", texto):
             repo_action, ref = m.group(1), m.group(2)
             if not re.fullmatch(r"[0-9a-f]{40}", ref):

@@ -146,6 +146,33 @@ Below 85 % green, a team learns to ignore red. That is the reason the threshold
 is where it is: an unstable pipeline is worse than no pipeline, because it
 trains people to merge past it.
 
+**On cancelled runs:** the rate is, and stays, successes over *concluded* runs
+(`success + failure`) — cancelling is not the same as failing, and is often a
+run superseded by a later push. But a cancelled run does not confirm the
+pipeline passed either, and hiding it let "CI green 100 %" cover a real
+incident: a test job cancelled 26 minutes in, while a job named like a
+deploy, in the *same* run, had already shipped to staging. The collector now
+records how many runs were cancelled in the window; the criterion's label
+shows the count when it is greater than zero (`CI green (100 % · 1
+cancelled)`), and `findings()` adds a line explaining that a cancelled run is
+not evidence of a green pipeline.
+
+When it can tell cheaply, it also flags the sharper case: a cancelled run
+that had, in the same run, a job whose *name* suggests deploy with
+conclusion `success`. That wording is deliberate — the job's `success` is
+measured, but "it was a deploy job" is inferred from its name, and a job
+name is a weak signal on its own. A gate job that only decides *whether* a
+deploy runs is not the deploy: the collector excludes any job name
+containing `gate`, `check`, `checks`, `lint` or `test` from this check even
+when it also contains `deploy` (a real false positive found in review: a job
+named "Checks rápidos (gate de deploy)"). When a name is ambiguous beyond
+that, the check simply does not fire — a missed real deploy costs less here
+than a false accusation. The finding stays `alto` even with the hedge: the
+filter already removes the known false-positive shape, and what remains — a
+cleanly deploy-named job concluding successfully while the same run's test
+job never confirmed anything — is structurally the incident that motivated
+this check in the first place.
+
 **On migrations:** the criterion used to be counted as met in any repository
 without a `manage.py`, because "no Django" and "no pending migration" both
 arrived as an empty list. They are now distinguished: with no `manage.py` the
@@ -155,28 +182,48 @@ look like a project that simply is not Django.
 
 ## Process
 
-| Criterion | Weight | Met when | Not audited when |
+| Criterion | Weight | Met when | Not audited / not applicable when |
 |---|---|---|---|
 | Production branch protected | 4 | the GitHub API reports branch protection | `gh` is absent, the repo has no GitHub remote, or the API call failed for any reason other than 404 |
 | README | 2 | `README.md`/`.rst`/`.txt` exists | the `governance` collector raised |
 | Documented decisions | 2 | `docs/adr/`, `docs/decisions/`, `adr/`, `docs/decisoes/` or `docs/` contains `.md` | idem |
-| License | 1 | `LICENSE` (any common extension) exists | idem |
-| Pre-commit hooks | 1 | `.pre-commit-config.yaml` exists | absent — counts as not audited, never as a failure |
-| Changelog | 2 | `CHANGELOG.md` or `docs/CHANGELOG.md` exists | absent — same |
+| License | 1 | `LICENSE` (any common extension) exists | **not applicable** when the repo's visibility is `PRIVATE`; not audited when the `governance` collector raised or visibility could not be determined |
+| Pre-commit hooks | 1 | `.pre-commit-config.yaml` exists | the `governance` collector raised |
+| Changelog | 2 | `CHANGELOG.md` or `docs/CHANGELOG.md` exists | idem |
 
 Branch protection is the heaviest single criterion of the axis because it is the
 only one that does not depend on anyone's discipline.
 
 **The file-existence criteria separate "the file is missing" from "nobody
-looked."** README, documented decisions, license and the operational runbook are
-read out of the `governance` collector, where a missing field looks exactly like
-a missing file. The grade therefore checks the collector first: when `governance`
-is absent from the snapshot — it raised, and the error is in `errors.governance`
-— those four report as *não auditado*, carry that error as the reason on the
-card, and leave the denominator. When the collector ran, an absent file is a
-finding, as it should be. Without the distinction, one exception in a collector
-produced four accusations ("no README", "no license", "no documented decisions",
-"no runbooks") about a project nobody had looked at.
+looked."** README, documented decisions, license, pre-commit, changelog and the
+operational runbook are read out of the `governance` collector, where a missing
+field looks exactly like a missing file. The grade therefore checks the
+collector first: when `governance` is absent from the snapshot — it raised, and
+the error is in `errors.governance` — those criteria report as *não auditado*,
+carry that error as the reason on the card, and leave the denominator. When the
+collector ran, an absent file is a finding, as it should be. Without the
+distinction, one exception in a collector produced accusations ("no README",
+"no license", "no documented decisions", "no runbooks") about a project nobody
+had looked at.
+
+**Pre-commit and changelog are measured, not skipped, when absent.** Both used
+to read `value or None` — a measured "does not exist" (`false`/`null`) collapsed
+into the same `None` as "the collector never ran," which pulled a real finding
+out of the denominator. That is the opposite failure from the one above: there
+it was "not measured" being read as clean, here it was "measured and missing"
+being read as "not measured." Both criteria now report a plain failure when the
+file is absent and the collector ran — the only case that removes them from the
+denominator is the `governance` collector having raised.
+
+**License is not applicable in a private repository, and the grade now says
+so instead of docking a point.** Visibility comes from the same `gh repo view`
+call that feeds branch protection. `PRIVATE` removes the criterion from the
+denominator with a *não se aplica* label — not a finding, not a pass by
+omission. `PUBLIC` keeps failing an absent `LICENSE` exactly as before. When
+visibility could not be determined (no `gh`, no GitHub remote, or the API call
+failed) the criterion keeps today's behavior — an absent file still fails it —
+but the label says the visibility itself was not established, so a missing
+license there is not misread as "confirmed public."
 
 A **404** from the protection endpoint is the answer that matters: the branch has
 no protection. Any other failure — 403, rate limit, network — leaves the

@@ -603,5 +603,240 @@ class TestImportant2OnlyComTypo(unittest.TestCase):
         self.assertIn("gitt", err.getvalue())
 
 
+# ----------------------------------------------------------------------
+# Calibragem de criterios (2026-08-13): 5 pontos onde o auditor media certo
+# e rotulava errado, achados de uma verificacao independente linha a linha.
+# ----------------------------------------------------------------------
+
+class TestAjuste3PermissionsNoJob(unittest.TestCase):
+    """`_analisa_workflows` registra tambem quem restringe o JOB, mesmo sem
+    bloco no topo — o criterio (bloco no topo) nao muda, so o dado extra que
+    o achado usa pra nao pintar "sem permissions" como "sem nada"."""
+
+    SEM_NADA = "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
+
+    COM_JOB_RESTRITO = (
+        "name: Publish\n"
+        "on: push\n"
+        "jobs:\n"
+        "  publish:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    permissions:\n"
+        "      packages: write\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+
+    COM_TOPO = (
+        "permissions:\n"
+        "  contents: read\n"
+        "name: CI\n"
+        "on: push\n"
+        "jobs:\n"
+        "  test:\n"
+        "    runs-on: ubuntu-latest\n"
+    )
+
+    def test_job_restrito_entra_em_permissions_no_job_e_continua_em_sem_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{".github/workflows/publish.yml": self.COM_JOB_RESTRITO})
+            out = collect._analisa_workflows(root)
+        self.assertIn("publish.yml", out["sem_permissions"])
+        self.assertIn("publish.yml", out["permissions_no_job"])
+
+    def test_workflow_sem_permissions_nenhuma_nao_entra_em_permissions_no_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{".github/workflows/ci.yml": self.SEM_NADA})
+            out = collect._analisa_workflows(root)
+        self.assertIn("ci.yml", out["sem_permissions"])
+        self.assertNotIn("ci.yml", out["permissions_no_job"])
+
+    def test_workflow_com_bloco_no_topo_nao_entra_em_nenhuma_lista(self):
+        """O criterio continua sendo o bloco no topo — job restrito nao
+        substitui isso, so complementa o achado quando falta."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{".github/workflows/ci.yml": self.COM_TOPO})
+            out = collect._analisa_workflows(root)
+        self.assertNotIn("ci.yml", out["sem_permissions"])
+        self.assertNotIn("ci.yml", out["permissions_no_job"])
+
+
+class TestAjuste5CIComCancelado(unittest.TestCase):
+    """`success_rate` continua sucesso/concluido (cancelar nao e falhar) —
+    mas o coletor passa a gravar quantos runs foram cancelados na janela, e
+    quais deles tinham um job de deploy ja bem-sucedido no MESMO run (o caso
+    mais caro: "CI verde" escondendo que o job de teste foi cancelado mas o
+    deploy subiu do mesmo jeito)."""
+
+    @staticmethod
+    def _run_list_json(runs):
+        import json as _json
+        return _json.dumps(runs)
+
+    def _fake_run(self, runs, jobs_por_id=None):
+        jobs_por_id = jobs_por_id or {}
+
+        def fake(cmd, *args, **kwargs):
+            if "run" in cmd and "list" in cmd:
+                return 0, self._run_list_json(runs), ""
+            if "run" in cmd and "view" in cmd:
+                run_id = int(cmd[cmd.index("view") + 1])
+                jobs = jobs_por_id.get(run_id)
+                if jobs is None:
+                    return 1, "", "gh: not found"
+                return 0, json.dumps({"jobs": jobs}), ""
+            raise AssertionError(f"comando inesperado: {cmd}")
+        return fake
+
+    def _runs(self, *conclusoes, workflow="CI"):
+        base = "2026-08-13T09:00:00Z"
+        return [
+            {"conclusion": c, "createdAt": base, "updatedAt": base,
+             "displayTitle": f"run {i}", "workflowName": workflow,
+             "headBranch": "main", "event": "push", "databaseId": 1000 + i}
+            for i, c in enumerate(conclusoes)
+        ]
+
+    def test_success_rate_ignora_cancelado_no_calculo(self):
+        """Guard contra sobrecorrecao: a formula NAO muda quando ha cancelado
+        — continua sucesso sobre concluido (sucesso+falha)."""
+        runs = self._runs("success", "success", "success", "failure", "cancelled")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run", side_effect=self._fake_run(runs)):
+                out = collect.collect_ci(root, {})
+        # 3 sucesso, 1 falha, 1 cancelado: taxa e 3/4 = 75.0, nao 3/5 = 60.0
+        self.assertEqual(out["success_rate"], 75.0)
+        self.assertEqual(out["cancelados"], 1)
+
+    def test_sem_cancelado_a_taxa_e_identica_a_de_antes(self):
+        """Mutacao inversa do guard: sem cancelado, `cancelados` e 0 e a taxa
+        nao muda nada."""
+        runs = self._runs("success", "success", "failure")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run", side_effect=self._fake_run(runs)):
+                out = collect.collect_ci(root, {})
+        self.assertEqual(out["success_rate"], round(200 / 3, 1))
+        self.assertEqual(out["cancelados"], 0)
+        self.assertEqual(out["cancelados_com_deploy_ok"], [])
+
+    def test_cancelado_com_deploy_bem_sucedido_no_mesmo_run_e_sinalizado(self):
+        """O caso que mais importa: job de teste cancelado, job de deploy do
+        MESMO run ja tinha terminado com sucesso."""
+        runs = self._runs("success", "cancelled")
+        jobs = {1001: [{"name": "test", "conclusion": "cancelled"},
+                       {"name": "deploy", "conclusion": "success"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run", side_effect=self._fake_run(runs, jobs)):
+                out = collect.collect_ci(root, {})
+        self.assertEqual(out["cancelados"], 1)
+        self.assertEqual(len(out["cancelados_com_deploy_ok"]), 1)
+
+    def test_cancelado_sem_job_de_deploy_nao_e_sinalizado(self):
+        """Guard contra sobrecorrecao: cancelado comum (sem deploy no mesmo
+        run) nao entra na lista de risco."""
+        runs = self._runs("cancelled")
+        jobs = {1000: [{"name": "test", "conclusion": "cancelled"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run", side_effect=self._fake_run(runs, jobs)):
+                out = collect.collect_ci(root, {})
+        self.assertEqual(out["cancelados"], 1)
+        self.assertEqual(out["cancelados_com_deploy_ok"], [])
+
+    def test_job_view_que_falha_nao_vira_falso_negativo(self):
+        """`gh run view` fora do ar nao pode virar "nao tinha deploy" — vira
+        omissao (o run simplesmente nao aparece na lista de risco), nunca
+        uma afirmacao negativa que ninguem apurou."""
+        runs = self._runs("cancelled")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run", side_effect=self._fake_run(runs, {})):
+                out = collect.collect_ci(root, {})
+        self.assertEqual(out["cancelados"], 1)
+        self.assertEqual(out["cancelados_com_deploy_ok"], [])
+
+
+class TestFixRound1PortaoNoNomeDoJob(unittest.TestCase):
+    """Achado da revisao (fix round 1): `_e_deploy` foi desenhada pra nome de
+    WORKFLOW, e o ajuste 5 a reaplicava sobre nome de JOB sem hedge
+    equivalente. Job de PORTAO (decide SE o deploy roda) nao e o deploy — e o
+    proprio ion tem um chamado "Checks rapidos (gate de deploy)", que batia
+    com "deploy" no nome e virava uma afirmacao categorica de que algo tinha
+    sido implantado."""
+
+    def test_job_parece_deploy_rejeita_o_caso_exato_do_ion(self):
+        self.assertFalse(
+            collect._job_parece_deploy("Checks rapidos (gate de deploy)", {}))
+
+    def test_job_parece_deploy_aceita_o_caso_legitimo(self):
+        self.assertTrue(
+            collect._job_parece_deploy("Deploy staging (webhooks Coolify)", {}))
+
+    def test_job_parece_deploy_rejeita_outras_palavras_de_portao(self):
+        for nome in ("Lint e deploy check", "Testes (deploy gate)", "Checks de deploy"):
+            self.assertFalse(collect._job_parece_deploy(nome, {}), nome)
+
+    def test_job_parece_deploy_ainda_aceita_nome_de_deploy_sem_ambiguidade(self):
+        for nome in ("Deploy", "Release para producao", "cd"):
+            self.assertTrue(collect._job_parece_deploy(nome, {}), nome)
+
+    def test_job_de_deploy_bem_sucedido_nao_dispara_no_caso_do_ion(self):
+        """Ponta a ponta: o job de gate do ion, mesmo `success`, nao conta."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            jobs = [{"name": "Checks rapidos (gate de deploy)", "conclusion": "success"}]
+            with mock.patch.object(
+                    collect, "run",
+                    return_value=(0, json.dumps({"jobs": jobs}), "")):
+                out = collect._job_de_deploy_bem_sucedido(root, 123, {})
+        self.assertFalse(out)
+
+    def test_job_de_deploy_bem_sucedido_continua_disparando_no_caso_legitimo(self):
+        """Mutacao inversa: job realmente chamado de deploy continua contando."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            jobs = [{"name": "Deploy staging (webhooks Coolify)", "conclusion": "success"}]
+            with mock.patch.object(
+                    collect, "run",
+                    return_value=(0, json.dumps({"jobs": jobs}), "")):
+                out = collect._job_de_deploy_bem_sucedido(root, 123, {})
+        self.assertTrue(out)
+
+    def test_collect_ci_ponta_a_ponta_nao_sinaliza_o_gate_do_ion(self):
+        """O mesmo caso, mas passando pelo `collect_ci` inteiro (`gh run
+        list` + `gh run view`) — nao so pela funcao isolada."""
+        base = "2026-08-13T09:00:00Z"
+        runs = [{"conclusion": "cancelled", "createdAt": base, "updatedAt": base,
+                "displayTitle": "run 0", "workflowName": "CI", "headBranch": "main",
+                "event": "push", "databaseId": 2000}]
+        jobs = {2000: [{"name": "Checks rapidos (gate de deploy)", "conclusion": "success"},
+                       {"name": "Testes", "conclusion": "cancelled"}]}
+
+        def fake_run(cmd, *args, **kwargs):
+            if "run" in cmd and "list" in cmd:
+                return 0, json.dumps(runs), ""
+            if "run" in cmd and "view" in cmd:
+                run_id = int(cmd[cmd.index("view") + 1])
+                return 0, json.dumps({"jobs": jobs.get(run_id, [])}), ""
+            raise AssertionError(f"comando inesperado: {cmd}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run", side_effect=fake_run):
+                out = collect.collect_ci(root, {})
+        self.assertEqual(out["cancelados"], 1)
+        self.assertEqual(out["cancelados_com_deploy_ok"], [],
+                         "job de gate nao pode disparar o achado de deploy bem-sucedido")
+
+
 if __name__ == "__main__":
     unittest.main()
