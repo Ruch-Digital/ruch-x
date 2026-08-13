@@ -620,6 +620,13 @@ def collect_django(root, cfg):
     if settings_mod:
         env_check = {**os.environ, "DJANGO_SETTINGS_MODULE": settings_mod}
     out["settings_module"] = settings_mod or os.environ.get("DJANGO_SETTINGS_MODULE")
+    # Sem `[django] settings_module` no toml, o check reflete a maquina de
+    # DEV — e ali DEBUG=True e a falta de HSTS/SSL sao esperados, nao
+    # defeito. Marcar isso evita o pior erro possivel num relatorio de
+    # auditoria: acusar de inseguro um sistema cuja producao esta correta
+    # (aconteceu no 1o uso real — 5 "avisos de seguranca" que sumiam com o
+    # settings de producao).
+    out["ambiente_de_producao"] = bool(settings_mod)
 
     rc, so, se = run([py, str(manage), "check", "--deploy"], cwd=root,
                      timeout=120, env=env_check)
@@ -1116,7 +1123,11 @@ def _analisa_workflows(root):
             texto = f.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if not re.search(r"^\s*permissions\s*:", texto, re.M):
+        # `permissions:` precisa estar no TOPO do workflow (coluna 0). O mesmo
+        # bloco dentro de um job so protege aquele job — os demais seguem
+        # herdando o token amplo. Sem a ancora, o auditor SUBESTIMAVA o
+        # problema (dizia 1 workflow exposto quando eram 3; achado do 1o uso).
+        if not re.search(r"^permissions\s*:", texto, re.M):
             out["sem_permissions"].append(f.name)
         for m in re.finditer(r"uses:\s*([\w.-]+/[\w.-]+)@([\w.\-/]+)", texto):
             repo_action, ref = m.group(1), m.group(2)

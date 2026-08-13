@@ -345,8 +345,15 @@ def auditoria(snap):
         (2, gov.get("dependabot"), "atualização automática de dependências", "P2",
          "Sem Dependabot/Renovate configurado.",
          "Ligar o Dependabot: ele abre PR de bump e avisa de CVE sem ninguém precisar lembrar."),
-        (3, len(sec_django) == 0 if sec_django is not None else None, "avisos de segurança do framework", "P1",
-         f"{len(sec_django)} aviso(s) de segurança no check de deploy.",
+        # Aviso de seguranca medido no settings de DEV nao vale como achado:
+        # DEBUG=True e falta de HSTS sao o esperado ali. Sem `[django]
+        # settings_module` apontando producao, o criterio sai como "não
+        # auditado" em vez de reprovar um sistema que pode estar correto.
+        (3, (len(sec_django) == 0) if dig(snap, "django", "ambiente_de_producao") else None,
+         "avisos de segurança do framework"
+         + ("" if dig(snap, "django", "ambiente_de_producao") else " (não auditado: settings de dev)"), "P1",
+         f"{len(sec_django)} aviso(s) de segurança no check de deploy "
+         f"(settings: {dig(snap, 'django', 'settings_module') or 'do ambiente'}).",
          "Revisar HSTS, cookies seguros e redirect de SSL nos settings de produção."),
     ], f"{len(seg)} segredo(s) · {len(wf.get('sem_pin') or [])} action(s) sem pin")
 
@@ -432,9 +439,17 @@ def findings(snap):
     # merece o mesmo tom — separado no coletor desde 2026-08-12.
     issues = dig(snap, "django", "deploy_issues") or []
     if issues:
+        prod = dig(snap, "django", "ambiente_de_producao")
         settings_mod = dig(snap, "django", "settings_module") or "settings do ambiente"
-        out.append(("alto", f"{len(issues)} aviso(s) de segurança do check --deploy "
-                            f"(rodado com {settings_mod})."))
+        if prod:
+            out.append(("alto", f"{len(issues)} aviso(s) de segurança do check --deploy "
+                                f"(settings de produção: {settings_mod})."))
+        else:
+            # Em dev, DEBUG e a falta de HSTS sao esperados — reportar como
+            # falha de seguranca seria alarme falso.
+            out.append(("info", f"{len(issues)} aviso(s) do check --deploy no settings de "
+                                f"DESENVOLVIMENTO — normal aqui. Configure "
+                                f"[django] settings_module pra auditar produção."))
 
     outros = dig(snap, "django", "other_issues") or []
     if outros:
