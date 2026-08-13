@@ -59,5 +59,19 @@ class TestCheckDjango(unittest.TestCase):
         self.assertEqual(out["pending_migrations"], ["app.0002_novo"])
 
 
+class TestGit(unittest.TestCase):
+
+    def test_diretorio_sem_git_nao_reporta_zero_commits(self):
+        """Sem repositorio git, "0 commits em 30 dias" e mentira: nao houve medicao."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            out = collect.collect_git(root, {})
+        self.assertIsNone(out["commits_30d"])
+        self.assertIsNone(out["commits_90d"])
+        self.assertIsNone(out["authors_30d"])
+        self.assertIsNone(out["hotspots"])
+        self.assertIn("commits_30d", out.get("nao_medido", {}))
+
+
 if __name__ == "__main__":
     unittest.main()

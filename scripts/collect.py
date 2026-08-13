@@ -711,8 +711,14 @@ def collect_git(root, cfg):
     out = {"branch": None, "commit": None, "commits_30d": 0, "commits_90d": 0,
            "authors_30d": [], "hotspots": [], "age_days": None}
 
-    rc, so, _ = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
+    rc, so, se = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
     if rc != 0:
+        # Sem git nao ha o que medir — e "0 commits" seria um veredito sobre
+        # o ritmo do time que ninguem apurou.
+        motivo = _motivo(rc, se)
+        for campo in ("commits_30d", "commits_90d", "authors_30d",
+                      "hotspots", "age_days"):
+            nao_medido(out, campo, motivo)
         return out
     out["branch"] = so.strip()
 
@@ -720,21 +726,33 @@ def collect_git(root, cfg):
     out["commit"] = so.strip()
 
     for window, key in (("30 days ago", "commits_30d"), ("90 days ago", "commits_90d")):
-        _, so, _ = run(["git", "rev-list", "--count", f"--since={window}", "HEAD"], cwd=root)
-        out[key] = int(so.strip() or 0)
+        rc, so, se = run(["git", "rev-list", "--count", f"--since={window}", "HEAD"], cwd=root)
+        if rc != 0:
+            nao_medido(out, key, _motivo(rc, se))
+        else:
+            out[key] = int(so.strip() or 0)
 
-    _, so, _ = run(["git", "shortlog", "-sn", "--since=30 days ago", "HEAD"], cwd=root)
-    for line in so.splitlines():
-        parts = line.strip().split("\t")
-        if len(parts) == 2:
-            out["authors_30d"].append({"author": parts[1], "commits": int(parts[0])})
+    rc, so, se = run(["git", "shortlog", "-sn", "--since=30 days ago", "HEAD"], cwd=root)
+    if rc != 0:
+        nao_medido(out, "authors_30d", _motivo(rc, se))
+    else:
+        for line in so.splitlines():
+            parts = line.strip().split("\t")
+            if len(parts) == 2:
+                out["authors_30d"].append({"author": parts[1], "commits": int(parts[0])})
 
-    _, so, _ = run(["git", "log", "--reverse", "--format=%ct", "-1"], cwd=root)
-    if so.strip():
+    rc, so, se = run(["git", "log", "--reverse", "--format=%ct", "-1"], cwd=root)
+    if rc != 0:
+        nao_medido(out, "age_days", _motivo(rc, se))
+    elif so.strip():
         first = datetime.fromtimestamp(int(so.strip()), tz=timezone.utc)
         out["age_days"] = (datetime.now(timezone.utc) - first).days
 
-    out["hotspots"] = hotspots(root, cfg)
+    achado = hotspots(root, cfg)
+    if achado is None:
+        nao_medido(out, "hotspots", "git log falhou")
+    else:
+        out["hotspots"] = achado
     return out
 
 
@@ -747,7 +765,9 @@ def hotspots(root, cfg):
     que ninguem entende - por isso o cruzamento.
     """
     window = cfg.get("hotspot_window", "180 days ago")
-    _, so, _ = run(["git", "log", f"--since={window}", "--name-only", "--format="], cwd=root)
+    rc, so, _ = run(["git", "log", f"--since={window}", "--name-only", "--format="], cwd=root)
+    if rc != 0:
+        return None  # nao ha historico pra cruzar; quem chama marca nao-medido
     churn = Counter(
         line.strip() for line in so.splitlines()
         if line.strip() and Path(line.strip()).suffix in SOURCE_EXTS
