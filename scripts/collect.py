@@ -142,7 +142,11 @@ def collect_code(root, cfg):
             out["comment_ratio"] = round(comments / code, 3) if code else None
 
     elif has("cloc"):
-        rc, so, _ = run(["cloc", "--json", "--quiet", str(root)])
+        rc, so, se = run(["cloc", "--json", "--quiet", str(root)])
+        if rc != 0 or not so.strip():
+            # cloc instalado que falha nao pode virar "projeto com 0 linhas".
+            nao_medido(out, "total_loc", _motivo(rc, se))
+            nao_medido(out, "total_files", _motivo(rc, se))
         if rc == 0 and so.strip():
             data = json.loads(so)
             out["tool"] = "cloc"
@@ -356,8 +360,9 @@ def collect_quality(root, cfg):
 
     # radon: complexidade ciclomatica por funcao (do PROJETO, nao das libs —
     # ver radon_ignore()).
-    rc, so, _ = run([sys.executable, "-m", "radon", "cc", "-j", "-s",
+    rc, so, se = run([sys.executable, "-m", "radon", "cc", "-j", "-s",
                      "--ignore", radon_ignore(), "."], cwd=root)
+    medido = False
     if rc == 0 and so.strip():
         try:
             data = json.loads(so)
@@ -375,6 +380,8 @@ def collect_quality(root, cfg):
                     })
             blocks.sort(key=lambda x: -x["complexity"])
             scores = [b["complexity"] for b in blocks]
+            # data valido com zero blocos (nenhum arquivo Python no projeto) eh
+            # medicao real, nao ausencia de medicao - fica de fora do nao_medido.
             out["complexity"] = {
                 "blocks_analyzed": len(blocks),
                 "avg": round(sum(scores) / len(scores), 2) if scores else 0,
@@ -382,8 +389,13 @@ def collect_quality(root, cfg):
                 "worst": blocks[:15],
                 "metodo": "radon",
             }
+            medido = True
         except json.JSONDecodeError:
             pass
+    if not medido:
+        # radon ausente, quebrado ou saida ilegivel - nao pode virar
+        # "complexidade zero" mudo, igual ao total_loc do scc/cloc.
+        nao_medido(out, "complexity", _motivo(rc, se))
     return out
 
 

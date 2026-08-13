@@ -259,6 +259,17 @@ class TestComplexidade(unittest.TestCase):
         for row in rows:
             self.assertEqual(row["metodo"], "heuristica")
 
+    def test_radon_que_falha_marca_complexity_nao_medido(self):
+        """Radon ausente/quebrado (rc 127) nao pode deixar "complexity" em
+        None silencioso — mesma classe de bug do total_loc do scc/cloc."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "run",
+                                    return_value=(127, "", "comando nao encontrado")):
+                out = collect.collect_quality(root, {})
+        self.assertIsNone(out["complexity"])
+        self.assertIn("complexity", out.get("nao_medido", {}))
+
 
 class TestContagemCodigo(unittest.TestCase):
 
@@ -281,6 +292,20 @@ class TestContagemCodigo(unittest.TestCase):
             with mock.patch.object(collect, "has", side_effect=lambda b: b == "scc"), \
                  mock.patch.object(collect, "run",
                                     return_value=(1, "", "scc: panic: runtime error")):
+                out = collect.collect_code(root, {})
+        self.assertIsNone(out["total_loc"])
+        self.assertIn("total_loc", out.get("nao_medido", {}))
+        self.assertIsNone(out["total_files"])
+        self.assertIn("total_files", out.get("nao_medido", {}))
+
+    def test_cloc_instalado_que_falha_nao_vira_projeto_com_zero_linhas(self):
+        """Mesma classe de bug do scc, so que no fallback: sem scc mas com
+        cloc quebrado (rc != 0), o relatorio nao pode afirmar "0 linhas"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "a = 1\n"})
+            with mock.patch.object(collect, "has", side_effect=lambda b: b == "cloc"), \
+                 mock.patch.object(collect, "run",
+                                    return_value=(1, "", "cloc: erro")):
                 out = collect.collect_code(root, {})
         self.assertIsNone(out["total_loc"])
         self.assertIn("total_loc", out.get("nao_medido", {}))
