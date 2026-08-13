@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from collect import STACK_MARKERS, COVERAGE_FILES, load_config  # noqa: E402
+from collect import IGNORE_DIRS, STACK_MARKERS, COVERAGE_FILES, load_config  # noqa: E402
 
 VERDE, AMARELO, VERMELHO, CINZA, NEGRITO, FIM = (
     "\033[32m", "\033[33m", "\033[31m", "\033[90m", "\033[1m", "\033[0m")
@@ -38,18 +38,46 @@ def tem(b):
 
 def tem_modulo(nome):
     try:
-        subprocess.run([sys.executable, "-c", f"import {nome}"],
+        # -P: sem o diretorio atual no sys.path. Sem isso, um arquivo
+        # `<nome>.py` na raiz de quem roda o doctor sombrearia o modulo
+        # instalado (mesma classe de risco do -m em collect.py). Modulo
+        # de verdade continua importando — instalado nao depende do cwd.
+        subprocess.run([sys.executable, "-P", "-c", f"import {nome}"],
                        capture_output=True, timeout=20, check=True)
         return True
     except Exception:  # noqa: BLE001
         return False
 
 
+def tem_arquivo_com_extensao(root, extensoes):
+    """True se existir pelo menos um arquivo com essas extensoes no projeto,
+    fora dos diretorios ignorados. Para na primeira ocorrencia e poda as
+    pastas grandes (venv, node_modules) durante a caminhada."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in IGNORE_DIRS and not d.startswith(".")]
+        if any(f.endswith(extensoes) for f in filenames):
+            return True
+    return False
+
+
 def detectar_stack(root):
+    """Stack pelos manifestos, com uma segunda porta pelos arquivos-fonte.
+
+    Amarrar a deteccao a `STACK_MARKERS` (pyproject/requirements/setup.py/
+    Pipfile) fazia o doctor PULAR EM SILENCIO os checks de radon e ruff em
+    todo repositorio Python sem manifesto — inclusive o proprio ruch-x, onde
+    a ausencia do radon e justamente o que derruba o eixo Qualidade pra F. O
+    README promete que "cada ausencia apaga um pedaco do painel — e o
+    doctor.py diz exatamente qual"; sem esta porta, ele nao dizia.
+    """
     achados = []
     for nome, arquivos in STACK_MARKERS:
         if any((root / a).exists() for a in arquivos):
             achados.append(nome)
+    if not any(x in achados for x in ("Django", "Python")) and \
+            tem_arquivo_com_extensao(root, (".py",)):
+        achados.append("Python")
     return achados
 
 
@@ -133,7 +161,7 @@ def main():
         print(f"      {AMARELO}→ {comando_cobertura(stack)}{FIM}")
 
     print(f"  {OK if dsn else FALTA} banco          ", end="")
-    print(f"{CINZA}METRICAS_DATABASE_URL definida{FIM}" if dsn else
+    print(f"{CINZA}RUCHX_DATABASE_URL definida{FIM}" if dsn else
           f"{CINZA}sem DSN{FIM}\n      {AMARELO}→ export RUCHX_DATABASE_URL="
           f'"postgresql://leitor:senha@host:5432/banco"{FIM}')
 

@@ -79,6 +79,132 @@ def env_or(cfg, key, env_name, default=None):
     return os.environ.get(env_name) or cfg.get(key) or default
 
 
+def caminho_contido(root, valor):
+    """Resolve `valor` DENTRO de root; devolve None se escapar ou nao existir.
+
+    O ruch-x.toml e conteudo do repositorio auditado. Sem esta checagem,
+    `manage_py = "/etc/passwd"` vira argumento de comando e `apps_dir = "/"`
+    faz a coleta varrer a maquina inteira (Path(root) / "/x" == "/x").
+    """
+    if not valor:
+        return None
+    try:
+        alvo = (Path(root) / valor).resolve()
+        base = Path(root).resolve()
+        alvo.relative_to(base)
+    except (ValueError, OSError):
+        return None
+    return alvo if alvo.exists() else None
+
+
+def nao_medido(out, campo, motivo):
+    """Marca um campo como NAO MEDIDO — e nao como medido-e-vazio.
+
+    A diferenca e a razao de existir de um relatorio de auditoria. `[]` diz
+    "varri e nao achei nada"; `None` diz "nao consegui varrer". Trocar um pelo
+    outro faz o painel dar criterio por atendido em cima de um comando que
+    morreu (visto no 1o uso real: settings inexistente no toml virava
+    "0 avisos de seguranca").
+    """
+    out[campo] = None
+    out.setdefault("nao_medido", {})[campo] = str(motivo)[:200]
+    return out
+
+
+def _motivo(rc, se):
+    """Motivo curto pro campo `nao_medido`, a partir do retorno de run()."""
+    if rc == 127:
+        return "comando nao encontrado"
+    if rc == 124:
+        return "timeout"
+    linhas = [ln.strip() for ln in (se or "").splitlines() if ln.strip()]
+    return linhas[-1][:200] if linhas else f"comando falhou (rc={rc})"
+
+
+# Redacao do snapshot. A ferramenta manda VERSIONAR o snapshot, entao tudo que
+# entra nele e potencialmente publico. Os padroes ficam explicitos aqui — do
+# mesmo jeito que os limiares da auditoria — pra poderem ser discutidos e
+# estendidos por quem usa.
+#
+# O grupo de prefixo `(^|[^A-Za-z])` no padrao de atribuicao (chave=valor)
+# existe porque `\b` nao separa "_" de letra: sem ele, `DATABASE_PASSWORD=...`
+# nao seria pego (o "_" antes de "PASSWORD" nao e fronteira de palavra pro
+# regex). O prefixo capturado volta no replace pra nao comer o "_"/inicio.
+#
+# Fix round 1 (revisao adversarial, 4 achados Critical):
+# 1. DSN: a senha pode conter "@"/":" literal (ex: "p@ss:w0rd"). O padrao
+#    original tinha a classe da senha excluindo "@", entao parava no
+#    PRIMEIRO "@" e vazava o resto da senha como se fosse host. Trocado
+#    pra `[^\s/]+` (so exclui espaco/barra, aceita "@" e ":"): sendo
+#    guloso, o regex backtracka ate o ULTIMO "@" antes do host/path.
+# 2. Nome composto por letras (sem separador nao-letra) tambem e credencial:
+#    "PGPASSWORD" (variavel canonica do libpq) nao tem "_" nem espaco antes
+#    de "PASSWORD" — adicionado como keyword explicita, do mesmo jeito que
+#    os limiares da auditoria: material auditavel, nao regra generica.
+#    "pwd"/"*_PWD"/"MYSQL_PWD" ja caem no `(^|[^A-Za-z])` existente (tem
+#    "_" antes), so precisavam de "pwd" na lista de keywords.
+# 3. Chave entre aspas (`"password": "valor"`, JSON) tem uma aspa de
+#    fechamento ENTRE a keyword e o separador `[=:]` — o separador exigia
+#    vir logo depois da keyword. Adicionado grupo de aspa opcional dos dois
+#    lados da keyword+separador.
+# 4. Bearer token e bloco PEM nao tinham padrao nenhum — adicionados como
+#    padroes proprios (nao cabem no formato chave=valor).
+REDACOES = [
+    # senha embutida em URL/DSN: mantem usuario e host (diagnostico) e mata
+    # a senha ate o ULTIMO "@" antes do host (a senha pode conter "@"/":").
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://[^\s:@/]+:)[^\s/]+(@)"), r"\1***\2"),
+    (re.compile(r"(?i)\b(PASSWORD)\s+'[^']*'"), r"\1 '***'"),
+    (re.compile(r"(?i)(^|[^A-Za-z])(password|passwd|pwd|pgpassword|senha|"
+                r"secret[_-]?key|api[_-]?key|token)"
+                r"([\"']?)(\s*[=:]\s*)([\"']?)[^\s\"';,]{6,}"), r"\1\2\3\4\5***"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "***"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "***"),
+    (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}"), "***"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "***"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "***"),
+    # header HTTP de autenticacao: "Bearer <token>" -> mata so o token
+    (re.compile(r"(?i)\b(bearer)\s+\S+"), r"\1 ***"),
+    # bloco PEM (chave privada RSA/EC/OPENSSH/generica): mata o corpo,
+    # mantem os marcadores BEGIN/END (o achado de que existe uma chave e
+    # relevante pro diagnostico; o conteudo da chave nao)
+    (re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)(.*?)(-----END [A-Z ]*PRIVATE KEY-----)",
+                re.DOTALL), r"\1***\3"),
+    # caminho de home. Nao e credencial, e por isso passou batido ate agora:
+    # o snapshot e VERSIONADO, e o stderr de qualquer comando que falha traz o
+    # caminho do interpretador — visto no 1o snapshot commitado deste proprio
+    # repositorio, publico: "/Users/<usuario>/Documents/<empresa>/Projetos/
+    # <projeto privado>/venv/bin/python3: No module named radon". Nome de
+    # usuario, layout do disco e nome de projeto alheio nao ajudam a
+    # diagnosticar nada; o RESTO do caminho ajuda, entao so o prefixo cai.
+    # Quem roda a ferramenta nao vai reler o snapshot linha a linha antes de
+    # commitar — a ferramenta e que tem que nao gravar isso.
+    (re.compile(r"(?i)/(?:Users|home)/[^/\s:\"']+/"), "~/"),
+    (re.compile(r"(?i)(?:[A-Za-z]:)?\\Users\\[^\\\s:\"']+\\"), r"~\\"),
+]
+
+
+def redigir(texto):
+    """Mascara credencial em texto livre, preservando o resto legivel."""
+    if not isinstance(texto, str):
+        return texto
+    for padrao, troca in REDACOES:
+        texto = padrao.sub(troca, texto)
+    return texto
+
+
+def redigir_estrutura(obj):
+    """Aplica a redacao em TODA string do snapshot, recursivamente.
+
+    Feito na saida, uma vez, em vez de campo a campo: o proximo coletor que
+    alguem escrever nao precisa lembrar de redigir nada.
+    """
+    if isinstance(obj, dict):
+        return {k: redigir_estrutura(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redigir_estrutura(v) for v in obj]
+    return redigir(obj)
+
+
 # --------------------------------------------------------------------------
 # codigo: linhas, linguagens, distribuicao por app
 # --------------------------------------------------------------------------
@@ -89,7 +215,11 @@ def collect_code(root, cfg):
            "by_language": [], "by_app": [], "comment_ratio": None}
 
     if has("scc"):
-        rc, so, _ = run(["scc", "--format", "json", "--no-cocomo", str(root)])
+        rc, so, se = run(["scc", "--format", "json", "--no-cocomo", str(root)])
+        if rc != 0 or not so.strip():
+            # scc instalado que falha nao pode virar "projeto com 0 linhas".
+            nao_medido(out, "total_loc", _motivo(rc, se))
+            nao_medido(out, "total_files", _motivo(rc, se))
         if rc == 0 and so.strip():
             data = json.loads(so)
             out["tool"] = "scc"
@@ -114,7 +244,11 @@ def collect_code(root, cfg):
             out["comment_ratio"] = round(comments / code, 3) if code else None
 
     elif has("cloc"):
-        rc, so, _ = run(["cloc", "--json", "--quiet", str(root)])
+        rc, so, se = run(["cloc", "--json", "--quiet", str(root)])
+        if rc != 0 or not so.strip():
+            # cloc instalado que falha nao pode virar "projeto com 0 linhas".
+            nao_medido(out, "total_loc", _motivo(rc, se))
+            nao_medido(out, "total_files", _motivo(rc, se))
         if rc == 0 and so.strip():
             data = json.loads(so)
             out["tool"] = "cloc"
@@ -160,10 +294,15 @@ def collect_code(root, cfg):
     return out
 
 
+# `.ruch-x` entra aqui pelo mesmo motivo que `.metricas` (o nome legado) ja
+# estava: e a saida da propria ferramenta. Sem isso o `dashboard.html` gerado
+# aqui e contado como codigo-fonte do projeto — no proprio ruch-x, um unico
+# HTML derivado fazia a deteccao de stack devolver `['HTML']` pra uma
+# ferramenta escrita em Python (medido em 2026-08-13).
 IGNORE_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache",
                ".pytest_cache", ".ruff_cache", "migrations", "staticfiles", "static",
-               "dist", "build", ".metricas", "htmlcov", ".tox", "vendor", "target",
-               ".next", ".nuxt", "coverage", "Pods", ".gradle", "bin", "obj"}
+               "dist", "build", ".ruch-x", ".metricas", "htmlcov", ".tox", "vendor",
+               "target", ".next", ".nuxt", "coverage", "Pods", ".gradle", "bin", "obj"}
 
 # Extensoes tratadas como codigo-fonte em qualquer linguagem. Usadas pelo mapa
 # de atrito e pelo contador proprio quando scc/cloc nao existem.
@@ -222,8 +361,8 @@ def module_candidates(root, cfg):
     """
     root = Path(root)
     configured = cfg.get("apps_dir") or cfg.get("modules_dir")
-    if configured and (root / configured).is_dir():
-        base = root / configured
+    base = caminho_contido(root, configured) if configured else None
+    if base and base.is_dir():
         dirs = [d for d in base.iterdir() if d.is_dir() and d.name not in IGNORE_DIRS]
         if dirs:
             return dirs, "Módulo"
@@ -288,56 +427,84 @@ def loc_by_module(root, cfg):
 def collect_quality(root, cfg):
     out = {"ruff": None, "complexity": None}
 
+    # Motivo do lint nao ter saido. Fica pendurado aqui e so vira `nao_medido`
+    # no fim, se nenhum dos dois caminhos (ruff, eslint) tiver medido: o
+    # ARQUIVO INTEIRO segue a regra "None e nao-medido, com motivo" e estes
+    # dois pontos eram a unica excecao — comando presente que falha, ou que
+    # devolve saida ilegivel, deixava `ruff: null` mudo, indistinguivel de
+    # "nao ha linter neste projeto".
+    motivo_lint = "nenhum linter disponível (ruff ausente e sem eslint no projeto)"
+
     if has("ruff"):
-        rc, so, _ = run(["ruff", "check", "--output-format", "json", "."], cwd=root)
-        if so.strip():
-            try:
-                items = json.loads(so)
-                by_rule = Counter(i.get("code") or "?" for i in items)
-                by_file = Counter(i.get("filename", "?") for i in items)
-                out["ruff"] = {
-                    "total": len(items),
-                    "by_rule": [{"rule": k, "count": v} for k, v in by_rule.most_common(12)],
-                    "worst_files": [{"file": rel(k, root), "count": v}
-                                    for k, v in by_file.most_common(10)],
-                }
-            except json.JSONDecodeError:
-                pass
+        # `ruff check` sai 1 quando ACHA violacao — o returncode nao diz se
+        # mediu. O sinal e a saida ser JSON: `[]` e "medi, esta limpo".
+        rc, so, se = run(["ruff", "check", "--output-format", "json", "."], cwd=root)
+        try:
+            items = json.loads(so) if so.strip() else None
+        except json.JSONDecodeError:
+            items = None
+        if isinstance(items, list):
+            by_rule = Counter(i.get("code") or "?" for i in items if isinstance(i, dict))
+            by_file = Counter(i.get("filename", "?") for i in items if isinstance(i, dict))
+            out["ruff"] = {
+                "total": len(items),
+                "by_rule": [{"rule": k, "count": v} for k, v in by_rule.most_common(12)],
+                "worst_files": [{"file": rel(k, root), "count": v}
+                                for k, v in by_file.most_common(10)],
+            }
+        else:
+            motivo_lint = f"ruff: {_motivo(rc, se) if rc else 'saída ilegível'}"
 
     if out["ruff"] is None and has("npx") and (Path(root) / "package.json").exists():
         # eslint so eh chamado se ja estiver configurado no projeto; --no-install
         # evita baixar pacote na maquina de quem esta so medindo.
-        rc, so, _ = run(["npx", "--no-install", "eslint", ".", "-f", "json"],
-                        cwd=root, timeout=300)
-        if so.strip().startswith("["):
-            try:
-                arquivos = json.loads(so)
-                itens = [(m.get("ruleId") or "?", a.get("filePath", "?"))
-                         for a in arquivos for m in a.get("messages", [])]
-                if itens:
-                    by_rule = Counter(r for r, _ in itens)
-                    by_file = Counter(f for _, f in itens)
-                    out["ruff"] = {
-                        "tool": "eslint", "total": len(itens),
-                        "by_rule": [{"rule": k, "count": v} for k, v in by_rule.most_common(12)],
-                        "worst_files": [{"file": rel(k, root), "count": v}
-                                        for k, v in by_file.most_common(10)],
-                    }
-            except json.JSONDecodeError:
-                pass
+        rc, so, se = run(["npx", "--no-install", "eslint", ".", "-f", "json"],
+                         cwd=root, timeout=300)
+        try:
+            arquivos = json.loads(so) if so.strip().startswith("[") else None
+        except json.JSONDecodeError:
+            arquivos = None
+        if isinstance(arquivos, list):
+            itens = [(m.get("ruleId") or "?", a.get("filePath", "?"))
+                     for a in arquivos if isinstance(a, dict)
+                     for m in (a.get("messages") or []) if isinstance(m, dict)]
+            by_rule = Counter(r for r, _ in itens)
+            by_file = Counter(f for _, f in itens)
+            out["ruff"] = {
+                "tool": "eslint", "total": len(itens),
+                "by_rule": [{"rule": k, "count": v} for k, v in by_rule.most_common(12)],
+                "worst_files": [{"file": rel(k, root), "count": v}
+                                for k, v in by_file.most_common(10)],
+            }
+        else:
+            motivo_lint = f"eslint: {_motivo(rc, se) if rc else 'saída ilegível'}"
+
+    if out["ruff"] is None:
+        nao_medido(out, "ruff", motivo_lint)
 
     # radon: complexidade ciclomatica por funcao (do PROJETO, nao das libs —
     # ver radon_ignore()).
-    rc, so, _ = run([sys.executable, "-m", "radon", "cc", "-j", "-s",
+    # -P: sem o diretorio do repositorio auditado no sys.path. Sem isso, um
+    # arquivo `radon.py` na raiz do projeto medido roda como __main__ na
+    # maquina de quem audita.
+    rc, so, se = run([sys.executable, "-P", "-m", "radon", "cc", "-j", "-s",
                      "--ignore", radon_ignore(), "."], cwd=root)
+    medido = False
     if rc == 0 and so.strip():
         try:
             data = json.loads(so)
+            # JSON valido com a FORMA errada (lista, string, numero) nao pode
+            # estourar `.items()` e matar o coletor inteiro: cai no mesmo
+            # `nao_medido` de qualquer outra saida ilegivel.
+            if not isinstance(data, dict):
+                raise json.JSONDecodeError("saida do radon nao e um objeto", so, 0)
             blocks = []
             for fname, items in data.items():
                 if not isinstance(items, list):
                     continue
                 for b in items:
+                    if not isinstance(b, dict):
+                        continue
                     blocks.append({
                         "file": rel(fname, root),
                         "name": b.get("name"),
@@ -347,14 +514,22 @@ def collect_quality(root, cfg):
                     })
             blocks.sort(key=lambda x: -x["complexity"])
             scores = [b["complexity"] for b in blocks]
+            # data valido com zero blocos (nenhum arquivo Python no projeto) eh
+            # medicao real, nao ausencia de medicao - fica de fora do nao_medido.
             out["complexity"] = {
                 "blocks_analyzed": len(blocks),
                 "avg": round(sum(scores) / len(scores), 2) if scores else 0,
                 "above_10": sum(1 for s in scores if s > 10),
                 "worst": blocks[:15],
+                "metodo": "radon",
             }
+            medido = True
         except json.JSONDecodeError:
             pass
+    if not medido:
+        # radon ausente, quebrado ou saida ilegivel - nao pode virar
+        # "complexidade zero" mudo, igual ao total_loc do scc/cloc.
+        nao_medido(out, "complexity", _motivo(rc, se))
     return out
 
 
@@ -389,6 +564,8 @@ def parse_coverage(root, cfg):
     Istanbul (jest/vitest), lcov, Cobertura e Go.
     """
     extra = cfg.get("coverage_file")
+    if extra and caminho_contido(root, extra) is None:
+        extra = None
     candidatos = ([(extra, "custom")] if extra else []) + COVERAGE_FILES
 
     for rel_path, kind in candidatos:
@@ -478,19 +655,36 @@ def coverage_by_module_py(data):
 def collect_tests(root, cfg):
     """Le o relatorio de cobertura em qualquer formato; roda pytest se pedido."""
     out = {"coverage_pct": None, "by_app": [], "test_count": None,
-           "duration_s": None, "slowest": [], "source": None}
+           "duration_s": None, "slowest": [], "source": None,
+           "coverage_age_days": None}
 
-    cov_path = Path(root) / cfg.get("coverage_json", "coverage.json")
+    cov_nome = cfg.get("coverage_json", "coverage.json")
+    cov_path = caminho_contido(root, cov_nome) or (Path(root) / "coverage.json")
     run_tests = cfg.get("run_tests", False)
 
     if not cov_path.exists() and run_tests:
         args = cfg.get("pytest_args", ["-q", "--cov", "--cov-report=json", "--durations=10"])
-        rc, so, se = run([sys.executable, "-m", "pytest", *args], cwd=root,
+        # -P: sem o diretorio do repositorio auditado no sys.path. Sem isso,
+        # um arquivo `pytest.py` na raiz do projeto medido roda como
+        # __main__ na maquina de quem audita (provado). Modulo instalado do
+        # proprio projeto continua importando: o pytest insere o rootdir no
+        # sys.path pelo mecanismo dele, nao pelo cwd do interpretador.
+        rc, so, se = run([sys.executable, "-P", "-m", "pytest", *args], cwd=root,
                          timeout=cfg.get("test_timeout", 900))
         out["source"] = "pytest"
         m = re.search(r"(\d+) passed", so)
         if m:
             out["test_count"] = int(m.group(1))
+        else:
+            # Suite que nem chegou a rodar (erro de coleta, import quebrado,
+            # timeout) deixava `test_count`/`duration_s` em None sem motivo —
+            # o painel mostrava o campo vazio como se ninguem tivesse pedido
+            # medicao. O returncode sozinho nao serve de sinal (pytest sai 1
+            # com teste FALHANDO, e ai o "N passed" existe): o sinal e o
+            # resumo da suite estar na saida.
+            motivo = _motivo(rc, se)
+            nao_medido(out, "test_count", motivo)
+            nao_medido(out, "duration_s", motivo)
         m = re.search(r"in ([\d.]+)s", so)
         if m:
             out["duration_s"] = float(m.group(1))
@@ -499,17 +693,31 @@ def collect_tests(root, cfg):
             if m:
                 out["slowest"].append({"duration_s": float(m.group(1)), "test": m.group(3)})
 
+    def _idade(rel_path):
+        """Ha quanto tempo o relatorio de cobertura foi gerado.
+
+        A coleta le o arquivo que estiver no disco. Sem a idade, cobertura
+        de tres meses atras entra no painel como se fosse de hoje.
+        """
+        try:
+            mtime = (Path(root) / rel_path).stat().st_mtime
+        except OSError:
+            return None
+        return int((datetime.now().timestamp() - mtime) / 86400)
+
     found = parse_coverage(root, cfg)
     if found:
         out["coverage_pct"] = found["pct"]
         out["source"] = found["source"]
         out["by_app"] = found.get("by_app", [])
+        out["coverage_age_days"] = _idade(found["source"])
         return out
 
     if cov_path.exists():
         try:
             data = json.loads(cov_path.read_text(encoding="utf-8"))
             out["source"] = out["source"] or "coverage.json"
+            out["coverage_age_days"] = _idade(cfg.get("coverage_json", "coverage.json"))
             out["coverage_pct"] = round(data.get("totals", {}).get("percent_covered", 0), 1)
             per_app = defaultdict(lambda: {"statements": 0, "missing": 0})
             for fname, fdata in data.get("files", {}).items():
@@ -599,17 +807,39 @@ def collect_django(root, cfg):
            "models": None, "version": None, "settings_module": None,
            "other_issues": []}
 
-    manage = Path(root) / cfg.get("manage_py", "manage.py")
-    if not manage.exists():
+    configurado = cfg.get("manage_py")
+    manage = caminho_contido(root, configurado or "manage.py")
+    if manage is None:
+        # Sair daqui com `pending_migrations = []` era CREDITO de graca: o
+        # criterio "migrations aplicadas" le `len(pend) == 0` e dava o ponto
+        # por atendido sem medicao nenhuma (sozinho, tirava o eixo
+        # Confiabilidade de 0%/F pra 40%/D num repositorio que nem Django e).
+        # Os dois motivos de cair aqui sao "nao medi", mas nao sao a mesma
+        # coisa pra quem le o painel: projeto sem Django e o esperado;
+        # `manage_py` do toml que nao resolve dentro da raiz e configuracao
+        # quebrada, e ficaria invisivel se os dois dessem o mesmo texto.
+        # `deploy_issues`/`other_issues` saiam daqui como `[]` pelo mesmo
+        # motivo — e o rotulo do painel entao culpava o motivo ERRADO:
+        # repositorio que nem Django e exibia "avisos de segurança do
+        # framework (não auditado: settings de dev)", que e o texto do caso em
+        # que o check RODOU contra um settings de desenvolvimento.
+        motivo = (f"manage_py configurado ({configurado}) não resolve dentro do repositório"
+                  if configurado else "projeto sem manage.py na raiz")
+        for campo in ("pending_migrations", "deploy_issues", "other_issues"):
+            nao_medido(out, campo, motivo)
         return out
 
-    py = cfg.get("python", sys.executable)
+    # `python` do toml so vale se apontar pra dentro do repositorio (venv do
+    # projeto). Caminho de fora usa o interpretador de quem esta auditando.
+    py = str(caminho_contido(root, cfg.get("python")) or sys.executable)
 
     rc, so, se = run([py, str(manage), "showmigrations", "--plan"], cwd=root, timeout=120)
     if rc == 0:
         for line in so.splitlines():
             if line.strip().startswith("[ ]"):
                 out["pending_migrations"].append(line.strip()[3:].strip())
+    else:
+        nao_medido(out, "pending_migrations", _motivo(rc, se))
 
     # `check --deploy` roda com o settings do AMBIENTE ATUAL. Em maquina de
     # dev isso significa avisar sobre DEBUG/SSL que so valem em producao —
@@ -631,17 +861,27 @@ def collect_django(root, cfg):
     rc, so, se = run([py, str(manage), "check", "--deploy"], cwd=root,
                      timeout=120, env=env_check)
     blob = so + se
-    # Separa o que e SEGURANCA (security.*) do que e recado de biblioteca
-    # (drf_spectacular, staticfiles...). Misturar os dois fazia o painel
-    # gritar "configuracao insegura" por causa de um schema de API — achado
-    # 2026-08-12: 10 "avisos de seguranca" e nenhum era de seguranca.
-    for m in re.finditer(r"^\?\:\s*\((\w+\.\w+)\)\s*(.+)$", blob, re.M):
-        item = {"code": m.group(1), "message": m.group(2).strip()[:200]}
-        alvo = "deploy_issues" if m.group(1).startswith("security.") else "other_issues"
-        out[alvo].append(item)
-    if not out["deploy_issues"]:
-        for m in re.finditer(r"\((security\.\w+)\)", blob):
-            out["deploy_issues"].append({"code": m.group(1), "message": ""})
+    # O returncode NAO serve de sinal: `check` sai 1 tambem quando RODOU e
+    # achou ERROR (medido em 2026-08-13 no ion — exit 1 por drf_spectacular
+    # com o security.W009 devidamente reportado). O sinal de que o comando
+    # chegou a medir e a saida ter FORMATO de check; um traceback nao tem.
+    rodou = bool(re.search(r"System check identified|^\?\:", blob, re.M))
+    if not rodou:
+        nao_medido(out, "deploy_issues", _motivo(rc, se))
+        nao_medido(out, "other_issues", _motivo(rc, se))
+    else:
+        # Separa o que e SEGURANCA (security.*) do que e recado de biblioteca
+        # (drf_spectacular, staticfiles...). Misturar os dois fazia o painel
+        # gritar "configuracao insegura" por causa de um schema de API —
+        # achado 2026-08-12: 10 "avisos de seguranca" e nenhum era de
+        # seguranca.
+        for m in re.finditer(r"^\?\:\s*\((\w+\.\w+)\)\s*(.+)$", blob, re.M):
+            item = {"code": m.group(1), "message": m.group(2).strip()[:200]}
+            alvo = "deploy_issues" if m.group(1).startswith("security.") else "other_issues"
+            out[alvo].append(item)
+        if not out["deploy_issues"]:
+            for m in re.finditer(r"\((security\.\w+)\)", blob):
+                out["deploy_issues"].append({"code": m.group(1), "message": ""})
 
     # contagem de models sem subir o Django: conta declaracoes em models.py
     model_count = app_count = 0
@@ -675,30 +915,53 @@ def collect_git(root, cfg):
     out = {"branch": None, "commit": None, "commits_30d": 0, "commits_90d": 0,
            "authors_30d": [], "hotspots": [], "age_days": None}
 
-    rc, so, _ = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
+    rc, so, se = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
     if rc != 0:
+        # Sem git nao ha o que medir — e "0 commits" seria um veredito sobre
+        # o ritmo do time que ninguem apurou.
+        motivo = _motivo(rc, se)
+        for campo in ("commits_30d", "commits_90d", "authors_30d",
+                      "hotspots", "age_days"):
+            nao_medido(out, campo, motivo)
         return out
     out["branch"] = so.strip()
 
-    _, so, _ = run(["git", "rev-parse", "--short", "HEAD"], cwd=root)
-    out["commit"] = so.strip()
+    # `commit: ""` era um campo vazio sem motivo: repositorio recem-criado
+    # (sem HEAD) ou objeto corrompido saiam iguais a "nao perguntei".
+    rc, so, se = run(["git", "rev-parse", "--short", "HEAD"], cwd=root)
+    if rc != 0:
+        nao_medido(out, "commit", _motivo(rc, se))
+    else:
+        out["commit"] = so.strip()
 
     for window, key in (("30 days ago", "commits_30d"), ("90 days ago", "commits_90d")):
-        _, so, _ = run(["git", "rev-list", "--count", f"--since={window}", "HEAD"], cwd=root)
-        out[key] = int(so.strip() or 0)
+        rc, so, se = run(["git", "rev-list", "--count", f"--since={window}", "HEAD"], cwd=root)
+        if rc != 0:
+            nao_medido(out, key, _motivo(rc, se))
+        else:
+            out[key] = int(so.strip() or 0)
 
-    _, so, _ = run(["git", "shortlog", "-sn", "--since=30 days ago", "HEAD"], cwd=root)
-    for line in so.splitlines():
-        parts = line.strip().split("\t")
-        if len(parts) == 2:
-            out["authors_30d"].append({"author": parts[1], "commits": int(parts[0])})
+    rc, so, se = run(["git", "shortlog", "-sn", "--since=30 days ago", "HEAD"], cwd=root)
+    if rc != 0:
+        nao_medido(out, "authors_30d", _motivo(rc, se))
+    else:
+        for line in so.splitlines():
+            parts = line.strip().split("\t")
+            if len(parts) == 2:
+                out["authors_30d"].append({"author": parts[1], "commits": int(parts[0])})
 
-    _, so, _ = run(["git", "log", "--reverse", "--format=%ct", "-1"], cwd=root)
-    if so.strip():
+    rc, so, se = run(["git", "log", "--reverse", "--format=%ct", "-1"], cwd=root)
+    if rc != 0:
+        nao_medido(out, "age_days", _motivo(rc, se))
+    elif so.strip():
         first = datetime.fromtimestamp(int(so.strip()), tz=timezone.utc)
         out["age_days"] = (datetime.now(timezone.utc) - first).days
 
-    out["hotspots"] = hotspots(root, cfg)
+    achado = hotspots(root, cfg)
+    if achado is None:
+        nao_medido(out, "hotspots", "git log falhou")
+    else:
+        out["hotspots"] = achado
     return out
 
 
@@ -711,7 +974,9 @@ def hotspots(root, cfg):
     que ninguem entende - por isso o cruzamento.
     """
     window = cfg.get("hotspot_window", "180 days ago")
-    _, so, _ = run(["git", "log", f"--since={window}", "--name-only", "--format="], cwd=root)
+    rc, so, _ = run(["git", "log", f"--since={window}", "--name-only", "--format="], cwd=root)
+    if rc != 0:
+        return None  # nao ha historico pra cruzar; quem chama marca nao-medido
     churn = Counter(
         line.strip() for line in so.splitlines()
         if line.strip() and Path(line.strip()).suffix in SOURCE_EXTS
@@ -722,7 +987,7 @@ def hotspots(root, cfg):
 
     # complexidade por arquivo via radon (soma dos blocos)
     per_file = {}
-    rc, so, _ = run([sys.executable, "-m", "radon", "cc", "-j",
+    rc, so, _ = run([sys.executable, "-P", "-m", "radon", "cc", "-j",
                      "--ignore", radon_ignore(), "."], cwd=root)
     if rc == 0 and so.strip():
         try:
@@ -743,17 +1008,20 @@ def hotspots(root, cfg):
         except OSError:
             continue
         cx = per_file.get(path)
+        metodo = "radon"
         if cx is None:
             # Fora do Python nao ha radon. Contar ramificacoes eh uma
             # aproximacao grosseira, mas serve pro que o mapa precisa:
             # ordenar arquivos entre si, nao produzir um numero absoluto.
+            # O rotulo vai junto pro painel nao passar heuristica por medicao.
+            metodo = "heuristica"
             try:
                 src = f.read_text(encoding="utf-8", errors="ignore")
                 cx = len(re.findall(BRANCH_WORDS, src))
             except OSError:
                 cx = 0
         rows.append({"file": path, "churn": times, "complexity": cx, "loc": loc,
-                     "score": times * cx})
+                     "score": times * cx, "metodo": metodo})
     rows.sort(key=lambda x: -x["score"])
     return rows[:40]
 
@@ -907,7 +1175,13 @@ def collect_infra(root, cfg):
     if host:
         env["DOCKER_HOST"] = host
 
-    out = {"host": host or "local", "containers": [], "images": [], "disk": None}
+    # O host do docker vai pro snapshot versionado: guarda o esquema e o fato
+    # de ser remoto, nao `ssh://root@<ip>` do servidor de producao de alguem.
+    if host:
+        rotulo = f"{host.split('://', 1)[0]}://***" if "://" in host else "remoto"
+    else:
+        rotulo = "local"
+    out = {"host": rotulo, "containers": [], "images": [], "disk": None}
 
     fmt = "{{json .}}"
     rc, so, se = run(["docker", "stats", "--no-stream", "--format", fmt], env=env, timeout=60)
@@ -1020,6 +1294,36 @@ VALORES_DE_TESTE = re.compile(
 )
 
 
+def _valor_do_achado(rotulo, trecho):
+    """O VALOR da credencial dentro do trecho casado — nunca a chave/usuario.
+
+    Rodar o VALORES_DE_TESTE no trecho inteiro erra dos DOIS lados, e os dois
+    foram medidos em 2026-08-13:
+
+    - **Falso positivo (DSN):** o filtro nao era nem consultado, e
+      `postgres://reader:password@host` de DOCUMENTACAO virava P0 — o achado
+      mais caro do relatorio. Aconteceu com o README deste proprio repositorio.
+    - **Regra morta (atribuicao):** o trecho casado COMECA pela chave
+      (`password`, `senha`, `secret_key`, `api_key`), e todas elas casam com a
+      lista de valores de teste. `VALORES_DE_TESTE.search(trecho)` era sempre
+      verdadeiro, entao NENHUM achado desse rotulo passava — nem
+      `password = "<16+ caracteres que nao parecem exemplo>"`. (O exemplo vai
+      entre `<>` de proposito: escrito por extenso, este docstring viraria o
+      proximo falso positivo — aconteceu na 1a rodada deste fix.)
+
+    Olhar so o valor tambem protege do outro erro: "test" no NOME DE USUARIO
+    (`postgres://testuser:S3nh4Real@host`) nao pode esconder uma senha real.
+    """
+    if rotulo == "DSN com senha":
+        # O padrao nao aceita ":" nem "@" dentro da senha: o "@" fecha o
+        # trecho e o ultimo ":" antes dele abre a senha.
+        return trecho.rstrip("@").rsplit(":", 1)[-1]
+    if rotulo == "senha em atribuicao":
+        m = re.search(r"[\"']([^\"']+)[\"']\s*$", trecho)
+        return m.group(1) if m else trecho
+    return trecho
+
+
 def _segredo_plausivel(rotulo, trecho, texto, pos):
     """Segundo filtro: o match parece segredo DE VERDADE?
 
@@ -1030,8 +1334,8 @@ def _segredo_plausivel(rotulo, trecho, texto, pos):
     # Placeholder explicito em qualquer achado: <senha>, ${VAR}, ***, xxx
     if re.search(r"[<>${}]|\*{3,}|x{4,}", trecho, re.I):
         return False
-    if rotulo == "senha em atribuicao":
-        return not VALORES_DE_TESTE.search(trecho)
+    if rotulo in ("senha em atribuicao", "DSN com senha"):
+        return not VALORES_DE_TESTE.search(_valor_do_achado(rotulo, trecho))
     if rotulo == "chave privada":
         # Chave real tem corpo base64 logo abaixo do cabecalho; mencao em doc
         # vem sozinha na linha, entre crases ou aspas.
@@ -1075,7 +1379,9 @@ def _varre_segredos(root, limite=8):
     """
     rc, so, _ = run(["git", "ls-files"], cwd=root, timeout=60)
     if rc != 0:
-        return []
+        # `[]` aqui seria "varri o repositorio inteiro e esta limpo" — o
+        # achado P0 do relatorio. Sem git nao houve varredura nenhuma.
+        return None
     achados = []
     exts_ignoradas = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".ico", ".woff",
                       ".woff2", ".ttf", ".zip", ".gz", ".lock", ".svg", ".webp"}
@@ -1155,9 +1461,20 @@ def _branch_protection(root):
     out = {"disponivel": True, "repo": slug, "branch": branch,
            "visibility": info.get("visibility"), "protegido": False,
            "exige_review": None, "exige_checks": None}
-    rc, so, _ = run(["gh", "api", f"repos/{slug}/branches/{branch}/protection"], cwd=root)
+    rc, so, se = run(["gh", "api", f"repos/{slug}/branches/{branch}/protection"], cwd=root)
     if rc != 0:
-        return out  # 404 = sem protecao; e a resposta que interessa
+        # 404 e a resposta que INTERESSA: a branch nao tem protecao. Qualquer
+        # outra falha (403 sem permissao, rate limit, rede) nao autoriza dizer
+        # "desprotegida" — isso seria acusar sem ter olhado. O padrao casa SO
+        # a forma real da resposta do gh ("gh: Not Found (HTTP 404)"), com
+        # ancora de palavra: "404" solto dentro de outro numero (epoch, id de
+        # request) nao pode virar "404 confirmado".
+        if re.search(r"\bnot found\b|\bhttp\s?404\b", se or "", re.I):
+            return out
+        out["disponivel"] = False
+        out["motivo"] = _motivo(rc, se)
+        out["protegido"] = None
+        return out
     try:
         prot = json.loads(so)
     except json.JSONDecodeError:
@@ -1170,39 +1487,88 @@ def _branch_protection(root):
     return out
 
 
+def _total_deps_npm(root):
+    """(total, motivo): dependencias diretas declaradas no package.json.
+
+    `npm outdated` conta o numerador e nao devolve denominador nenhum. Sem o
+    total, `desatualizadas` nao vira percentual e o criterio inteiro e
+    DESCARTADO — 37 dependencias velhas medidas davam a mesma nota de
+    Seguranca que um projeto em dia (medido em 2026-08-13). O denominador
+    honesto e o mesmo universo que o `npm outdated` varre por padrao: as
+    dependencias diretas do manifesto.
+    """
+    pkg = Path(root) / "package.json"
+    try:
+        dados = json.loads(pkg.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return None, f"package.json ilegível ({type(exc).__name__})"
+    if not isinstance(dados, dict):
+        return None, "package.json não é um objeto JSON"
+    total = 0
+    for chave in ("dependencies", "devDependencies", "optionalDependencies"):
+        bloco = dados.get(chave)
+        if isinstance(bloco, dict):
+            total += len(bloco)
+    return total, None
+
+
 def _deps_desatualizadas(root, cfg):
     """Quantas dependencias estao para tras. Dependencia velha e divida que
     rende juros: quanto mais tempo passa, mais caro fica o upgrade."""
     out = {"ferramenta": None, "total": None, "desatualizadas": None, "exemplos": []}
-    py = cfg.get("python", sys.executable)
+    py = str(caminho_contido(root, cfg.get("python")) or sys.executable)
     if (Path(root) / "requirements.txt").exists() or (Path(root) / "pyproject.toml").exists():
-        rc, so, _ = run([py, "-m", "pip", "list", "--outdated", "--format", "json"],
+        rc, so, _ = run([py, "-P", "-m", "pip", "list", "--outdated", "--format", "json"],
                         cwd=root, timeout=180)
         if rc == 0 and so.strip():
             try:
                 itens = json.loads(so)
-                rc2, so2, _ = run([py, "-m", "pip", "list", "--format", "json"],
-                                  cwd=root, timeout=120)
+                rc2, so2, se2 = run([py, "-P", "-m", "pip", "list", "--format", "json"],
+                                    cwd=root, timeout=120)
                 total = len(json.loads(so2)) if rc2 == 0 and so2.strip() else None
                 out.update({
                     "ferramenta": "pip", "total": total, "desatualizadas": len(itens),
                     "exemplos": [{"nome": i.get("name"), "atual": i.get("version"),
                                   "ultima": i.get("latest_version")} for i in itens[:8]],
                 })
+                if total is None:
+                    # Numerador sem denominador: o criterio nao pode ser
+                    # avaliado, e tem que DIZER isso em vez de sumir.
+                    nao_medido(out, "total", _motivo(rc2, se2))
                 return out
             except json.JSONDecodeError:
                 pass
     if (Path(root) / "package.json").exists() and has("npm"):
-        rc, so, _ = run(["npm", "outdated", "--json"], cwd=root, timeout=180)
-        if so.strip():
-            try:
-                itens = json.loads(so)
-                out.update({"ferramenta": "npm", "desatualizadas": len(itens),
-                            "exemplos": [{"nome": k, "atual": v.get("current"),
-                                          "ultima": v.get("latest")}
-                                         for k, v in list(itens.items())[:8]]})
-            except json.JSONDecodeError:
-                pass
+        # O returncode NAO serve de sinal: `npm outdated` sai 1 justamente
+        # quando ACHOU dependencia velha (medicao bem-sucedida). O sinal e a
+        # saida ser um objeto JSON — `{}` e "medi e esta tudo em dia".
+        rc, so, se = run(["npm", "outdated", "--json"], cwd=root, timeout=180)
+        try:
+            itens = json.loads(so) if so.strip() else None
+        except json.JSONDecodeError:
+            itens = None
+        if not isinstance(itens, dict):
+            nao_medido(out, "desatualizadas",
+                       _motivo(rc, se) if rc else "npm outdated devolveu saída ilegível")
+            return out
+        out.update({"ferramenta": "npm", "desatualizadas": len(itens),
+                    "exemplos": [{"nome": k, "atual": v.get("current"),
+                                  "ultima": v.get("latest")}
+                                 for k, v in list(itens.items())[:8]
+                                 if isinstance(v, dict)]})
+        total, motivo = _total_deps_npm(root)
+        if total is None:
+            nao_medido(out, "total", motivo)
+        else:
+            out["total"] = total
+        return out
+    if out["desatualizadas"] is None and "nao_medido" not in out:
+        # Nenhum manifesto reconhecido (ou a ferramenta do stack ausente).
+        # Sem marcar, o criterio aparecia como um "(—/—)" pelado, sem o
+        # leitor descobrir se ninguem olhou ou se nao havia o que olhar.
+        nao_medido(out, "desatualizadas",
+                   "nenhum manifesto de dependências reconhecido (requirements.txt, "
+                   "pyproject.toml ou package.json com npm)")
     return out
 
 
@@ -1234,7 +1600,7 @@ def collect_governance(root, cfg):
         txt = gitignore.read_text(encoding="utf-8", errors="ignore")
         ignora_env = bool(re.search(r"^\s*\.env", txt, re.M))
 
-    return {
+    resultado = {
         "docs": docs,
         "gitignore": {"existe": gitignore.exists(), "ignora_env": ignora_env},
         "dependabot": (root / ".github" / "dependabot.yml").exists()
@@ -1248,6 +1614,10 @@ def collect_governance(root, cfg):
         "segredos_commitados": _varre_segredos(root),
         "dependencias": _deps_desatualizadas(root, cfg),
     }
+    if resultado["segredos_commitados"] is None:
+        nao_medido(resultado, "segredos_commitados",
+                   "git ls-files falhou — nenhum arquivo foi varrido")
+    return resultado
 
 
 # --------------------------------------------------------------------------
@@ -1369,6 +1739,36 @@ REGISTRY = {
 }
 
 
+def _nomes_de_coletor(bruto, flag):
+    """Nomes de coletor de uma lista separada por virgula, avisando os que nao
+    existem.
+
+    Nome fora do REGISTRY era descartado em silencio nas duas flags. Em
+    `--skip` isso falha seguro (o coletor roda), em `--only` nao: filtra tudo
+    e produz um snapshot vazio com exit 0.
+    """
+    nomes = [c.strip() for c in bruto.split(",") if c.strip()]
+    desconhecidos = [c for c in nomes if c not in REGISTRY]
+    if desconhecidos:
+        print(f"aviso: {flag} recebeu coletor(es) desconhecido(s): "
+              f"{', '.join(desconhecidos)} — validos: {', '.join(sorted(REGISTRY))}",
+              file=sys.stderr)
+    return nomes
+
+
+def gravar_snapshot(snapshot, path, outdir):
+    """Redige e grava o snapshot em `path` e em `outdir/latest.json`.
+
+    Redacao na saida: o snapshot e versionado, entao nada que passe por aqui
+    pode carregar credencial (str(exc) de conexao, texto de query, host).
+    """
+    limpo = redigir_estrutura(snapshot)
+    corpo = json.dumps(limpo, indent=2, ensure_ascii=False, default=str)
+    path.write_text(corpo, encoding="utf-8")
+    (outdir / "latest.json").write_text(corpo, encoding="utf-8")
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser(description="Coleta metricas do projeto")
     ap.add_argument("--root", default=".")
@@ -1387,9 +1787,16 @@ def main():
 
     selected = COLLECTORS
     if args.only:
-        selected = [c.strip() for c in args.only.split(",") if c.strip() in REGISTRY]
+        pedidos = _nomes_de_coletor(args.only, "--only")
+        selected = [c for c in pedidos if c in REGISTRY]
+        if not selected:
+            # Um `--only gouvernance` (typo) filtrava tudo em silencio e saia
+            # com exit 0: snapshot sem coletor nenhum, `errors: {}`, e o
+            # dashboard desse snapshot dizendo "Nenhum alerta nos limiares
+            # configurados" — laudo limpo de uma coleta que nao aconteceu.
+            raise SystemExit("--only nao selecionou nenhum coletor valido — nada foi coletado")
     if args.skip:
-        skip = {c.strip() for c in args.skip.split(",")}
+        skip = set(_nomes_de_coletor(args.skip, "--skip"))
         selected = [c for c in selected if c not in skip]
 
     snapshot = {
@@ -1416,9 +1823,7 @@ def main():
     outdir.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d")
     path = Path(args.out) if args.out else outdir / f"{stamp}.json"
-    path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-    (outdir / "latest.json").write_text(
-        json.dumps(snapshot, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    gravar_snapshot(snapshot, path, outdir)
 
     print(f"\nsnapshot: {path}", file=sys.stderr)
     if snapshot["errors"]:

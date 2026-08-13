@@ -35,6 +35,17 @@ cliente pode discutir o critério, não receber veredito de caixa-preta.
 O resto do painel segue respondendo as três perguntas de sempre: **o que mudou desde a última
 vez**, **onde dói mais agora**, e **o que fazer a respeito**.
 
+## Onde é seguro rodar
+
+O Ruch-X **executa código do projeto auditado** — inclusive o `manage.py`, que
+importa settings, apps e `.env` e abre conexão de banco. Rode em repositório
+que você confia. Auditar código de terceiro (due diligence de repo alheio) pede
+container ou VM descartável. Detalhe em `docs/security.md`.
+
+Critério que a ferramenta não conseguiu medir sai como **não auditado** e
+**não entra na nota** — nem premia nem pune. Se o painel disser "não auditado",
+diga isso ao usuário em vez de tratar como aprovado.
+
 ## Como apresentar o veredito
 
 Não leia os cinco eixos em voz alta — eles estão na tela. Diga **a nota mais baixa, por que ela é
@@ -216,8 +227,11 @@ cron local, ou um job no CI que roda o `collect.py` e commita o snapshot:
 0 8 * * 1 cd /caminho/do/projeto && python scripts/collect.py --skip infra
 ```
 
-Versione `.ruch-x/*.json` no git (são pequenos e viram histórico). Adicione
-`.ruch-x/dashboard.html` ao `.gitignore` — é derivado, regenera em um segundo.
+Versione os snapshots datados `.ruch-x/<data>.json` (são pequenos e viram
+histórico). Deixe `.ruch-x/dashboard.html` e `.ruch-x/latest.json` no
+`.gitignore` — o primeiro é derivado e regenera em um segundo; o segundo é só um
+ponteiro pro snapshot mais recente, e versioná-lo duplica o arquivo datado a
+cada coleta.
 
 ## Vários projetos
 
@@ -236,3 +250,8 @@ pasta: o histórico assume um único projeto e as tendências ficam sem sentido.
   (Coolify, Easypanel, VPS) e o que fazer quando a coleta de CI falha.
 - `references/extensao.md` — como adicionar um coletor novo ou uma seção nova no
   dashboard. Leia antes de editar os scripts.
+
+A pasta `docs/` é a documentação pública, em inglês (`security.md`, `criteria.md`,
+`configuration.md`, `languages.md`, `extending.md`). Mande o usuário pra lá quando
+ele quiser o detalhe de um critério, a lista completa de chaves do toml ou o
+modelo de ameaça — não traduza o conteúdo de cabeça.

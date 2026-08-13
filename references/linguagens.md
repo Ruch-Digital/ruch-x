@@ -48,11 +48,16 @@ formatos reconhecidos, na ordem de tentativa:
 | Go | `coverage.out` | `go test ./... -coverprofile=coverage.out` |
 | JaCoCo | `target/site/jacoco/jacoco.xml` | `mvn test jacoco:report` |
 
-Se o seu arquivo está em outro lugar, aponte no toml:
+Se o seu arquivo está em outro lugar, aponte no toml — mas **só JSON é lido por
+essa chave** (formato coverage.py, com `totals`, ou Istanbul, com `total`):
 
 ```toml
-coverage_file = "build/reports/cobertura.xml"
+coverage_file = "build/coverage.json"
 ```
+
+XML e lcov apontados em `coverage_file` são ignorados em silêncio: para esses,
+grave o relatório em um dos caminhos padrão da tabela acima. A chave também
+obedece à contenção de caminho — fora da raiz do repositório, é recusada.
 
 A quebra de cobertura **por módulo** só existe hoje no formato do coverage.py.
 Nos demais, o dashboard mostra o total. É a maior lacuna atual — os outros

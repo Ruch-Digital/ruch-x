@@ -1,6 +1,11 @@
 __pycache__/
 *.pyc
-.ruch-x/
-.metricas/
+# O snapshot DATADO e o historico e vai pro git — e o que o README manda fazer.
+# Fora ficam o dashboard (derivado, regenera em um segundo) e o latest.json
+# (ponteiro pro mais recente; versionar duplicaria o datado a cada coleta).
+.ruch-x/dashboard.html
+.ruch-x/latest.json
+.metricas/dashboard.html
+.metricas/latest.json
 .venv/
 venv/
