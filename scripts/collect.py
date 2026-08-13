@@ -79,6 +79,24 @@ def env_or(cfg, key, env_name, default=None):
     return os.environ.get(env_name) or cfg.get(key) or default
 
 
+def caminho_contido(root, valor):
+    """Resolve `valor` DENTRO de root; devolve None se escapar ou nao existir.
+
+    O ruch-x.toml e conteudo do repositorio auditado. Sem esta checagem,
+    `manage_py = "/etc/passwd"` vira argumento de comando e `apps_dir = "/"`
+    faz a coleta varrer a maquina inteira (Path(root) / "/x" == "/x").
+    """
+    if not valor:
+        return None
+    try:
+        alvo = (Path(root) / valor).resolve()
+        base = Path(root).resolve()
+        alvo.relative_to(base)
+    except (ValueError, OSError):
+        return None
+    return alvo if alvo.exists() else None
+
+
 def nao_medido(out, campo, motivo):
     """Marca um campo como NAO MEDIDO — e nao como medido-e-vazio.
 
@@ -327,8 +345,8 @@ def module_candidates(root, cfg):
     """
     root = Path(root)
     configured = cfg.get("apps_dir") or cfg.get("modules_dir")
-    if configured and (root / configured).is_dir():
-        base = root / configured
+    base = caminho_contido(root, configured) if configured else None
+    if base and base.is_dir():
         dirs = [d for d in base.iterdir() if d.is_dir() and d.name not in IGNORE_DIRS]
         if dirs:
             return dirs, "Módulo"
@@ -433,7 +451,10 @@ def collect_quality(root, cfg):
 
     # radon: complexidade ciclomatica por funcao (do PROJETO, nao das libs —
     # ver radon_ignore()).
-    rc, so, se = run([sys.executable, "-m", "radon", "cc", "-j", "-s",
+    # -P: sem o diretorio do repositorio auditado no sys.path. Sem isso, um
+    # arquivo `radon.py` na raiz do projeto medido roda como __main__ na
+    # maquina de quem audita.
+    rc, so, se = run([sys.executable, "-P", "-m", "radon", "cc", "-j", "-s",
                      "--ignore", radon_ignore(), "."], cwd=root)
     medido = False
     if rc == 0 and so.strip():
@@ -503,6 +524,8 @@ def parse_coverage(root, cfg):
     Istanbul (jest/vitest), lcov, Cobertura e Go.
     """
     extra = cfg.get("coverage_file")
+    if extra and caminho_contido(root, extra) is None:
+        extra = None
     candidatos = ([(extra, "custom")] if extra else []) + COVERAGE_FILES
 
     for rel_path, kind in candidatos:
@@ -595,7 +618,8 @@ def collect_tests(root, cfg):
            "duration_s": None, "slowest": [], "source": None,
            "coverage_age_days": None}
 
-    cov_path = Path(root) / cfg.get("coverage_json", "coverage.json")
+    cov_nome = cfg.get("coverage_json", "coverage.json")
+    cov_path = caminho_contido(root, cov_nome) or (Path(root) / "coverage.json")
     run_tests = cfg.get("run_tests", False)
 
     if not cov_path.exists() and run_tests:
@@ -728,11 +752,13 @@ def collect_django(root, cfg):
            "models": None, "version": None, "settings_module": None,
            "other_issues": []}
 
-    manage = Path(root) / cfg.get("manage_py", "manage.py")
-    if not manage.exists():
+    manage = caminho_contido(root, cfg.get("manage_py", "manage.py"))
+    if manage is None:
         return out
 
-    py = cfg.get("python", sys.executable)
+    # `python` do toml so vale se apontar pra dentro do repositorio (venv do
+    # projeto). Caminho de fora usa o interpretador de quem esta auditando.
+    py = str(caminho_contido(root, cfg.get("python")) or sys.executable)
 
     rc, so, se = run([py, str(manage), "showmigrations", "--plan"], cwd=root, timeout=120)
     if rc == 0:
@@ -883,7 +909,7 @@ def hotspots(root, cfg):
 
     # complexidade por arquivo via radon (soma dos blocos)
     per_file = {}
-    rc, so, _ = run([sys.executable, "-m", "radon", "cc", "-j",
+    rc, so, _ = run([sys.executable, "-P", "-m", "radon", "cc", "-j",
                      "--ignore", radon_ignore(), "."], cwd=root)
     if rc == 0 and so.strip():
         try:
@@ -1357,14 +1383,14 @@ def _deps_desatualizadas(root, cfg):
     """Quantas dependencias estao para tras. Dependencia velha e divida que
     rende juros: quanto mais tempo passa, mais caro fica o upgrade."""
     out = {"ferramenta": None, "total": None, "desatualizadas": None, "exemplos": []}
-    py = cfg.get("python", sys.executable)
+    py = str(caminho_contido(root, cfg.get("python")) or sys.executable)
     if (Path(root) / "requirements.txt").exists() or (Path(root) / "pyproject.toml").exists():
-        rc, so, _ = run([py, "-m", "pip", "list", "--outdated", "--format", "json"],
+        rc, so, _ = run([py, "-P", "-m", "pip", "list", "--outdated", "--format", "json"],
                         cwd=root, timeout=180)
         if rc == 0 and so.strip():
             try:
                 itens = json.loads(so)
-                rc2, so2, _ = run([py, "-m", "pip", "list", "--format", "json"],
+                rc2, so2, _ = run([py, "-P", "-m", "pip", "list", "--format", "json"],
                                   cwd=root, timeout=120)
                 total = len(json.loads(so2)) if rc2 == 0 and so2.strip() else None
                 out.update({
