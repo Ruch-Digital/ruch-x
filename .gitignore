@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.ruch-x/
+.metricas/
+.venv/
+venv/

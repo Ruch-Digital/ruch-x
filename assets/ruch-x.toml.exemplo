@@ -1,0 +1,43 @@
+# ruch-x.toml — copie para a raiz do projeto e ajuste.
+# Tudo aqui é opcional. Sem este arquivo a coleta usa os padrões.
+# Segredo NUNCA entra aqui: DSN e tokens vêm de variável de ambiente.
+
+project = "meu-projeto"     # aparece como título do dashboard; padrão é o nome da pasta
+apps_dir = "apps"           # onde ficam os apps Django; se não existir, procura por apps.py
+manage_py = "manage.py"
+
+# Rodar a suíte de testes durante a coleta. Deixe false e rode os testes no seu
+# fluxo normal com --cov-report=json — a coleta lê o coverage.json que sobra.
+run_tests = false
+coverage_json = "coverage.json"
+pytest_args = ["-q", "--cov", "--cov-report=json", "--durations=10"]
+test_timeout = 900
+
+# Janela do mapa de atrito. Projeto novo pede janela menor; legado pede maior.
+hotspot_window = "180 days ago"
+
+[django]
+# `check --deploy` roda com o settings do ambiente atual — numa máquina de dev
+# ele acusa DEBUG/SSL que só valem em produção. Aponte o módulo de produção pra
+# ter o retrato que interessa (o coletor só lê a saída; não sobe servidor).
+# Se o settings de produção exigir variáveis (SECRET_KEY etc), exporte antes.
+settings_module = "meuprojeto.settings.production"
+
+[infra]
+# Easypanel e qualquer VPS: aponte o cliente Docker pro host por SSH.
+# Precisa de chave SSH sem senha. Teste com: DOCKER_HOST=ssh://root@host docker ps
+docker_host = "ssh://root@meu-vps"
+project_prefix = "meuprojeto"   # filtra containers quando o host tem vários projetos
+
+[ci]
+limit = 40                       # quantas execuções do GitHub Actions analisar
+
+[db]
+# O DSN vem de RUCHX_DATABASE_URL (ou DATABASE_URL). Use usuário SOMENTE LEITURA:
+#
+#   CREATE USER ruchx WITH PASSWORD 'trocar';
+#   GRANT pg_monitor TO ruchx;
+#   GRANT CONNECT ON DATABASE meubanco TO ruchx;
+#
+# Multi-tenant com schema por tenant: acrescente ao DSN
+#   ?options=-csearch_path%3Dtenant_x
