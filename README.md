@@ -88,8 +88,15 @@ Run it from the root of the repository you want to measure. `render.py` reads
 useful the trends get — a single snapshot still produces the dashboard, just
 without the deltas.
 
-Commit `.ruch-x/*.json` (they are small, and they are the history) and add
-`dashboard.html` to `.gitignore` — it is derived and regenerates in a second.
+Commit the dated snapshots `.ruch-x/<date>.json` — they are small, and they
+are the history. Keep `dashboard.html` and `latest.json` out of git: the first
+is derived and regenerates in a second, the second is a convenience pointer to
+the newest snapshot and would duplicate a file you already committed.
+
+```gitignore
+.ruch-x/dashboard.html
+.ruch-x/latest.json
+```
 
 ## Any language
 

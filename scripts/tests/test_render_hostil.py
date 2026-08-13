@@ -154,14 +154,29 @@ class TestSiblingWorkflowsNaoMedido(unittest.TestCase):
     duas checks de workflow (pin e permissions) saiam "atendidas" de graca.
     """
 
+    @staticmethod
+    def _por_prefixo(checados, prefixo):
+        """Casa o criterio pelo INICIO do rotulo.
+
+        O rotulo passou a carregar o motivo do nao-auditado como sufixo
+        ("actions com versão fixada (não auditado: ...)"). Este guard existe
+        pra travar o COMPORTAMENTO — `ok` nunca vira True sem medicao — e nao
+        o texto; casar exato impediria melhorar o rotulo.
+        """
+        return next(ok for rot, ok in checados if rot.startswith(prefixo))
+
     def test_governance_ausente_nao_credita_workflows(self):
         sem_governance = _snap(errors={"governance": "boom: falha inesperada"})
         eixos = {x["nome"]: x for x in render.auditoria(sem_governance)[0]}
-        checklist = dict(eixos["Segurança"]["checados"])
-        ok_pin = checklist["actions com versão fixada"]
-        ok_perm = checklist["workflows com permissions declarado"]
+        checklist = eixos["Segurança"]["checados"]
+        ok_pin = self._por_prefixo(checklist, "actions com versão fixada")
+        ok_perm = self._por_prefixo(checklist, "workflows com permissions declarado")
         self.assertIsNone(ok_pin, "sem coletor rodado, pin nao pode sair True")
         self.assertIsNone(ok_perm, "sem coletor rodado, permissions nao pode sair True")
+        # O motivo tem que chegar JUNTO do criterio, no card do eixo — nao so
+        # na lista de achados no fim da pagina.
+        rotulos = " ".join(r for r, _ in checklist)
+        self.assertIn("boom: falha inesperada", rotulos)
 
     def test_governance_presente_com_workflows_vazio_e_realmente_ok(self):
         """Contraste: quando o coletor RODOU e workflows e legitimamente vazio
@@ -172,9 +187,16 @@ class TestSiblingWorkflowsNaoMedido(unittest.TestCase):
             "dependencias": {},
         })
         eixos = {x["nome"]: x for x in render.auditoria(com_governance)[0]}
-        checklist = dict(eixos["Segurança"]["checados"])
-        self.assertTrue(checklist["actions com versão fixada"])
-        self.assertTrue(checklist["workflows com permissions declarado"])
+        checklist = eixos["Segurança"]["checados"]
+        self.assertTrue(self._por_prefixo(checklist, "actions com versão fixada"))
+        self.assertTrue(self._por_prefixo(checklist, "workflows com permissions declarado"))
+        # Coletor rodado nao pode deixar sufixo de nao-auditado nos criterios
+        # QUE DEPENDEM DELE — os rotulos saem limpos. (O criterio do Django no
+        # mesmo eixo tem um sufixo proprio e legitimo, de outro coletor.)
+        rotulos = [r for r, _ in checklist]
+        self.assertIn("actions com versão fixada", rotulos)
+        self.assertIn("workflows com permissions declarado", rotulos)
+        self.assertIn("atualização automática de dependências", rotulos)
 
 
 class TestGovernanceAusenteNaoReprova(unittest.TestCase):

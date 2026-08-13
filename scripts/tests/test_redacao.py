@@ -8,6 +8,7 @@ apagado depois.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -247,6 +248,88 @@ class TestGravarSnapshotNaoVazaCredencial(unittest.TestCase):
                 self.assertNotIn("s3nh4Secreta", relido["errors"]["db"])
                 self.assertIn("10.0.0.9", relido["errors"]["db"])  # diagnostico fica
                 self.assertEqual(relido["project"], "demo")  # texto legitimo intacto
+
+
+class TestCaminhoDeHome(unittest.TestCase):
+    """Fix round 3: caminho de home no snapshot VERSIONADO.
+
+    Achado lendo o 1o snapshot commitado deste repositorio (publico) antes de
+    dar `git add`: o `nao_medido` do radon carregava
+    `/Users/<usuario>/Documents/<empresa>/Projetos/<projeto privado>/venv/bin/
+    python3: No module named radon` — nome de usuario, layout de disco e o nome
+    de um projeto que nao tem nada a ver com o repositorio publicado. Nao e
+    credencial, entao nenhum padrao pegava. E ninguem vai reler o snapshot
+    linha a linha antes de commitar.
+    """
+
+    def test_home_posix_vira_til(self):
+        self.assertEqual(
+            collect.redigir("/Users/fulano/Documents/Cliente/venv/bin/python3: "
+                            "No module named radon"),
+            "~/Documents/Cliente/venv/bin/python3: No module named radon")
+
+    def test_home_linux_vira_til(self):
+        self.assertEqual(collect.redigir("/home/deploy/app/manage.py"),
+                         "~/app/manage.py")
+
+    def test_home_windows_vira_til(self):
+        self.assertEqual(collect.redigir(r"C:\Users\Fulano\projetos\app\manage.py"),
+                         r"~\projetos\app\manage.py")
+
+    def test_caminho_relativo_nao_e_tocado(self):
+        """Guard contra sobrecorrecao: caminho DENTRO do repositorio e o dado
+        util do painel (hotspots, arquivos com lint). Nao pode virar `~`."""
+        for caminho in ("scripts/collect.py", "apps/crm/models.py",
+                        "/usr/local/lib/python3.14/site-packages",
+                        "/opt/homebrew/bin/python3", "/var/log/app.log"):
+            self.assertEqual(collect.redigir(caminho), caminho)
+
+
+class TestFalsoPositivoDeSegredo(unittest.TestCase):
+    """Fix round 3: "falso positivo mata auditoria" — e P0 e o achado mais caro.
+
+    O varredor acusou o README DESTE repositorio (`postgres://reader:password@
+    host`, exemplo de documentacao) de segredo commitado. `_segredo_plausivel`
+    so consultava VALORES_DE_TESTE pro rotulo `senha em atribuicao` — e mesmo
+    la a checagem era letra morta, porque rodava no trecho INTEIRO, que comeca
+    pela chave (`password`, `secret_key`), que casa com a propria lista.
+    """
+
+    @staticmethod
+    def _acusa(rotulo, texto):
+        padrao = dict(collect.SECRET_PATTERNS)[rotulo]
+        m = re.search(padrao, texto)
+        if not m:
+            return False
+        return collect._segredo_plausivel(rotulo, m.group(0), texto, m.start())
+
+    def test_dsn_de_documentacao_nao_e_acusado(self):
+        self.assertFalse(self._acusa(
+            "DSN com senha",
+            'export RUCHX_DATABASE_URL="postgresql://reader:password@host:5432/db"'))
+
+    def test_dsn_com_senha_de_verdade_continua_sendo_acusado(self):
+        """Guard contra sobrecorrecao: filtrar demais cega o varredor, e o
+        criterio vale 5 pontos com prioridade P0."""
+        self.assertTrue(self._acusa(
+            "DSN com senha", "DATABASE_URL=postgres://app:x9Kq2mVt7Lp@10.0.0.9/prod"))
+
+    def test_test_no_usuario_nao_esconde_senha_real(self):
+        """O filtro olha SO o valor da senha: "test" no nome de usuario nao
+        pode comprar imunidade pra credencial de verdade."""
+        self.assertTrue(self._acusa(
+            "DSN com senha", "postgres://testuser:R7pQ2wZ9mLx4@db.interno/prod"))
+
+    def test_atribuicao_com_valor_de_teste_nao_e_acusada(self):
+        self.assertFalse(self._acusa(
+            "senha em atribuicao", 'password = "testpass1234567890"'))
+
+    def test_atribuicao_com_valor_real_volta_a_ser_acusada(self):
+        """A regra era letra morta: NENHUM achado deste rotulo passava, porque
+        a chave (`password`/`secret_key`) casava com VALORES_DE_TESTE antes de
+        alguem olhar o valor."""
+        self.assertTrue(self._acusa(
+            "senha em atribuicao", 'SECRET_KEY = "Xk9wQ2vB7nR4tZ1aP5"'))
 
 
 if __name__ == "__main__":

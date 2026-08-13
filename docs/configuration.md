@@ -160,5 +160,7 @@ snapshot directory; without it, a symlinked path is refused (see
 exists, collection keeps writing there instead — a rename must not cost anyone
 their history.
 
-Commit the `*.json` files; they are small and they are the time series. Put
-`dashboard.html` in `.gitignore`; it is derived.
+Commit the dated snapshots; they are small and they are the time series.
+Keep `dashboard.html` and `latest.json` out of git — the first is derived, and
+the second is a pointer to the newest snapshot, so versioning it duplicates the
+dated file on every collection without adding information.

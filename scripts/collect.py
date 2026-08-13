@@ -169,6 +169,17 @@ REDACOES = [
     # relevante pro diagnostico; o conteudo da chave nao)
     (re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)(.*?)(-----END [A-Z ]*PRIVATE KEY-----)",
                 re.DOTALL), r"\1***\3"),
+    # caminho de home. Nao e credencial, e por isso passou batido ate agora:
+    # o snapshot e VERSIONADO, e o stderr de qualquer comando que falha traz o
+    # caminho do interpretador — visto no 1o snapshot commitado deste proprio
+    # repositorio, publico: "/Users/<usuario>/Documents/<empresa>/Projetos/
+    # <projeto privado>/venv/bin/python3: No module named radon". Nome de
+    # usuario, layout do disco e nome de projeto alheio nao ajudam a
+    # diagnosticar nada; o RESTO do caminho ajuda, entao so o prefixo cai.
+    # Quem roda a ferramenta nao vai reler o snapshot linha a linha antes de
+    # commitar — a ferramenta e que tem que nao gravar isso.
+    (re.compile(r"(?i)/(?:Users|home)/[^/\s:\"']+/"), "~/"),
+    (re.compile(r"(?i)(?:[A-Za-z]:)?\\Users\\[^\\\s:\"']+\\"), r"~\\"),
 ]
 
 
@@ -1235,6 +1246,36 @@ VALORES_DE_TESTE = re.compile(
 )
 
 
+def _valor_do_achado(rotulo, trecho):
+    """O VALOR da credencial dentro do trecho casado — nunca a chave/usuario.
+
+    Rodar o VALORES_DE_TESTE no trecho inteiro erra dos DOIS lados, e os dois
+    foram medidos em 2026-08-13:
+
+    - **Falso positivo (DSN):** o filtro nao era nem consultado, e
+      `postgres://reader:password@host` de DOCUMENTACAO virava P0 — o achado
+      mais caro do relatorio. Aconteceu com o README deste proprio repositorio.
+    - **Regra morta (atribuicao):** o trecho casado COMECA pela chave
+      (`password`, `senha`, `secret_key`, `api_key`), e todas elas casam com a
+      lista de valores de teste. `VALORES_DE_TESTE.search(trecho)` era sempre
+      verdadeiro, entao NENHUM achado desse rotulo passava — nem
+      `password = "<16+ caracteres que nao parecem exemplo>"`. (O exemplo vai
+      entre `<>` de proposito: escrito por extenso, este docstring viraria o
+      proximo falso positivo — aconteceu na 1a rodada deste fix.)
+
+    Olhar so o valor tambem protege do outro erro: "test" no NOME DE USUARIO
+    (`postgres://testuser:S3nh4Real@host`) nao pode esconder uma senha real.
+    """
+    if rotulo == "DSN com senha":
+        # O padrao nao aceita ":" nem "@" dentro da senha: o "@" fecha o
+        # trecho e o ultimo ":" antes dele abre a senha.
+        return trecho.rstrip("@").rsplit(":", 1)[-1]
+    if rotulo == "senha em atribuicao":
+        m = re.search(r"[\"']([^\"']+)[\"']\s*$", trecho)
+        return m.group(1) if m else trecho
+    return trecho
+
+
 def _segredo_plausivel(rotulo, trecho, texto, pos):
     """Segundo filtro: o match parece segredo DE VERDADE?
 
@@ -1245,8 +1286,8 @@ def _segredo_plausivel(rotulo, trecho, texto, pos):
     # Placeholder explicito em qualquer achado: <senha>, ${VAR}, ***, xxx
     if re.search(r"[<>${}]|\*{3,}|x{4,}", trecho, re.I):
         return False
-    if rotulo == "senha em atribuicao":
-        return not VALORES_DE_TESTE.search(trecho)
+    if rotulo in ("senha em atribuicao", "DSN com senha"):
+        return not VALORES_DE_TESTE.search(_valor_do_achado(rotulo, trecho))
     if rotulo == "chave privada":
         # Chave real tem corpo base64 logo abaixo do cabecalho; mencao em doc
         # vem sozinha na linha, entre crases ou aspas.

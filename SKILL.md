@@ -227,8 +227,11 @@ cron local, ou um job no CI que roda o `collect.py` e commita o snapshot:
 0 8 * * 1 cd /caminho/do/projeto && python scripts/collect.py --skip infra
 ```
 
-Versione `.ruch-x/*.json` no git (são pequenos e viram histórico). Adicione
-`.ruch-x/dashboard.html` ao `.gitignore` — é derivado, regenera em um segundo.
+Versione os snapshots datados `.ruch-x/<data>.json` (são pequenos e viram
+histórico). Deixe `.ruch-x/dashboard.html` e `.ruch-x/latest.json` no
+`.gitignore` — o primeiro é derivado e regenera em um segundo; o segundo é só um
+ponteiro pro snapshot mais recente, e versioná-lo duplica o arquivo datado a
+cada coleta.
 
 ## Vários projetos
 

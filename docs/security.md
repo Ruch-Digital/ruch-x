@@ -104,15 +104,16 @@ measured (see §5).
 ## 3. What goes into the snapshot
 
 Snapshots are meant to be committed — that is where the time series comes from.
-Everything written to `.ruch-x/<date>.json` and `.ruch-x/latest.json` is
-therefore potentially public.
+Everything written to `.ruch-x/<date>.json` is therefore potentially public.
+(`latest.json` gets the same treatment but stays out of git — it only points at
+the newest snapshot.)
 
 Fields that carry text from outside the tool:
 
 | Field | Source |
 |---|---|
 | `errors.<collector>` | `str(exception)` from the failing collector (300 chars) — a bad DSN lands here |
-| `<collector>.nao_medido.<field>` | last line of the failed command's stderr (200 chars) — which routinely includes **absolute paths from the auditing machine**, e.g. `/Users/you/projects/venv/bin/python3: No module named radon` |
+| `<collector>.nao_medido.<field>` | last line of the failed command's stderr (200 chars) — routinely an absolute path, e.g. `~/projects/venv/bin/python3: No module named radon` (the home prefix is rewritten; see below) |
 | `db.slow_queries[].query` | first 160 chars of query text from `pg_stat_statements` |
 | `db.<query>.unavailable` | PostgreSQL error text |
 | `django.deploy_issues[].message`, `django.other_issues[].message` | `check --deploy` output (200 chars) |
@@ -127,8 +128,9 @@ Two mechanisms keep credentials out.
 `redigir_estrutura` over the whole structure — every string **value**, at every
 depth, in both files. Dictionary keys are walked but not rewritten, so a
 collector must never use a secret as a key. It is applied on the way out rather
-than field by field, so a new collector cannot forget it. The patterns live in `REDACOES` in `collect.py`,
-explicit so they can be reviewed and extended. There are ten of them:
+than field by field, so a new collector cannot forget it. The patterns live in
+`REDACOES` in `collect.py`, explicit so they can be reviewed and extended. There
+are twelve of them:
 
 | Input | Stored |
 |---|---|
@@ -140,6 +142,7 @@ explicit so they can be reviewed and extended. There are ten of them:
 | `ghp_…`, `github_pat_…`, `sk-…`, `sk-ant-…`, `AKIA…`, `xoxb-…` | `***` |
 | `Authorization: Bearer eyJhbGciOi…` | `Authorization: Bearer ***` |
 | `-----BEGIN RSA PRIVATE KEY-----…-----END RSA PRIVATE KEY-----` | markers kept, body replaced by `***` |
+| `/Users/ana/proj/venv/bin/python3`, `/home/ana/...`, `C:\Users\Ana\...` | `~/proj/venv/bin/python3` — home prefix only |
 
 The DSN pattern keeps user and host — they are diagnostic — and masks the
 password up to the **last** `@` before the host, so a password containing `@` or
@@ -155,11 +158,20 @@ such as `token do GitHub`. The matched text is used for the plausibility filter
 and then discarded. A finding tells you where to look; it does not republish the
 credential into a file you are about to commit.
 
-**Redaction covers credentials, not privacy.** Local filesystem paths, machine
-names, branch names, commit subjects and package names pass through untouched —
-they are diagnostic, and there is no pattern that could separate a sensitive one
-from a useful one. Read a snapshot once before you commit the first one,
-especially in a public repository.
+**Home directories are rewritten too.** They are not credentials, which is why
+they went unnoticed until the first snapshot of this repository was read before
+being committed: the reason recorded for a failed `radon` call carried
+`/Users/<user>/Documents/<company>/Projects/<private project>/venv/bin/python3`.
+Username, disk layout and the name of an unrelated project, on their way into a
+public repository. `/Users/<name>/`, `/home/<name>/` and `C:\Users\<name>\`
+now become `~/`; the rest of the path survives, because that is the part with
+diagnostic value.
+
+**What still passes through untouched:** machine and container names, branch
+names, commit subjects, package names, and any path that is not under a home
+directory. They are diagnostic, and no pattern separates a sensitive one from a
+useful one. Read your first snapshot before committing it, especially in a
+public repository.
 
 Redaction is a safety net, not a licence. A collector that has a secret in hand
 should not put it in the snapshot in the first place.

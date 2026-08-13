@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "project": "ruch-x",
-  "generated_at": "2026-08-13T13:29:51-03:00",
+  "generated_at": "2026-08-13T13:40:47-03:00",
   "collectors_run": [
     "stack",
     "code",
@@ -16,20 +16,20 @@
   "errors": {},
   "stack": {
     "detected": [
-      "Python"
+      "HTML"
     ],
-    "primary": "Python",
+    "primary": "HTML",
     "dependencies": null
   },
   "code": {
     "tool": "builtin",
-    "total_loc": 3769,
+    "total_loc": 3893,
     "total_files": 8,
     "by_language": [
       {
         "language": "Python",
         "files": 8,
-        "code": 3769,
+        "code": 3893,
         "comments": 0,
         "blanks": 0,
         "complexity": 0
@@ -38,9 +38,9 @@
     "by_app": [
       {
         "app": "scripts",
-        "code": 2363,
-        "tests": 1030,
-        "test_ratio": 0.44
+        "code": 2389,
+        "tests": 1112,
+        "test_ratio": 0.47
       }
     ],
     "comment_ratio": null,
@@ -158,30 +158,30 @@
   },
   "git": {
     "branch": "feat/integridade-e-seguranca",
-    "commit": "c23545b",
-    "commits_30d": 19,
-    "commits_90d": 19,
+    "commit": "c4a8232",
+    "commits_30d": 20,
+    "commits_90d": 20,
     "authors_30d": [
       {
         "author": "Wilkerson Carlos",
-        "commits": 19
+        "commits": 20
       }
     ],
     "hotspots": [
       {
         "file": "scripts/collect.py",
         "churn": 14,
-        "complexity": 351,
-        "loc": 1477,
-        "score": 4914,
+        "complexity": 354,
+        "loc": 1513,
+        "score": 4956,
         "metodo": "heuristica"
       },
       {
         "file": "scripts/render.py",
-        "churn": 6,
+        "churn": 7,
         "complexity": 225,
-        "loc": 1016,
-        "score": 1350,
+        "loc": 1017,
+        "score": 1575,
         "metodo": "heuristica"
       },
       {
@@ -193,19 +193,19 @@
         "metodo": "heuristica"
       },
       {
+        "file": "scripts/tests/test_render_hostil.py",
+        "churn": 4,
+        "complexity": 26,
+        "loc": 506,
+        "score": 104,
+        "metodo": "heuristica"
+      },
+      {
         "file": "scripts/tests/test_nao_medido.py",
         "churn": 8,
         "complexity": 10,
         "loc": 291,
         "score": 80,
-        "metodo": "heuristica"
-      },
-      {
-        "file": "scripts/tests/test_render_hostil.py",
-        "churn": 3,
-        "complexity": 22,
-        "loc": 486,
-        "score": 66,
         "metodo": "heuristica"
       },
       {
@@ -219,9 +219,9 @@
       {
         "file": "scripts/tests/test_redacao.py",
         "churn": 2,
-        "complexity": 3,
-        "loc": 202,
-        "score": 6,
+        "complexity": 5,
+        "loc": 269,
+        "score": 10,
         "metodo": "heuristica"
       },
       {

@@ -483,20 +483,21 @@ def auditoria(snap):
     sec_django = _seguro(dig(snap, "django", "deploy_issues"), list)
     eixo("Segurança", [
         (5, None if seg is None else len(seg) == 0,
-         "nenhum segredo commitado" + _nao_medido(snap, "governance", "segredos_commitados"), "P0",
+         "nenhum segredo commitado"
+         + (_nao_medido(snap, "governance", "segredos_commitados") or gov_rotulo), "P0",
          f"{len(seg or [])} possível(is) segredo(s) em arquivo versionado: {_arquivos(seg)}.",
          "Revogar a credencial (o histórico do git guarda para sempre) e mover para variável de ambiente."),
-        (3, None if wf_raw is None else len(sem_pin) == 0, "actions com versão fixada", "P1",
+        (3, None if wf_raw is None else len(sem_pin) == 0, "actions com versão fixada" + gov_rotulo, "P1",
          f"{len(sem_pin)} action(s) referenciada(s) por tag móvel "
          f"(ex: {sem_pin[0] if sem_pin else '—'}).",
          "Fixar no SHA do commit: tag pode ser reapontada e roda código novo dentro do seu CI, com seus secrets."),
-        (2, None if wf_raw is None else len(sem_perm) == 0, "workflows com permissions declarado", "P2",
+        (2, None if wf_raw is None else len(sem_perm) == 0, "workflows com permissions declarado" + gov_rotulo, "P2",
          f"{len(sem_perm)} workflow(s) sem bloco `permissions` — herdam token amplo.",
          "Declarar `permissions:` com o mínimo necessário em cada workflow."),
-        (2, None if pct_velhas is None else pct_velhas < 25, f"dependências atualizadas ({desatual}/{total_deps})", "P2",
+        (2, None if pct_velhas is None else pct_velhas < 25, f"dependências atualizadas ({desatual}/{total_deps})" + gov_rotulo, "P2",
          f"{desatual} de {total_deps} dependências desatualizadas ({pct_velhas:.0f}%)." if pct_velhas else "",
          "Dependência velha é dívida com juros: quanto mais espera, mais caro e arriscado o upgrade."),
-        (2, gov.get("dependabot"), "atualização automática de dependências", "P2",
+        (2, gov.get("dependabot"), "atualização automática de dependências" + gov_rotulo, "P2",
          "Sem Dependabot/Renovate configurado.",
          "Ligar o Dependabot: ele abre PR de bump e avisa de CVE sem ninguém precisar lembrar."),
         # Aviso de seguranca medido no settings de DEV nao vale como achado:
@@ -552,10 +553,10 @@ def auditoria(snap):
         (1, _do_gov(docs.get("licenca")), "licença" + gov_rotulo, "P2",
          "Sem arquivo de licença — em repositório privado é aceitável; público, não.",
          "Adicionar LICENSE se o código for distribuído."),
-        (1, gov.get("pre_commit") or None, "hooks de pre-commit", "P2",
+        (1, gov.get("pre_commit") or None, "hooks de pre-commit" + gov_rotulo, "P2",
          "Sem pre-commit: lint e formatação dependem de lembrete humano.",
          "Configurar pre-commit com o linter que já está no projeto."),
-        (2, bool(docs.get("changelog")) or None, "histórico de mudanças", "P2",
+        (2, bool(docs.get("changelog")) or None, "histórico de mudanças" + gov_rotulo, "P2",
          "Sem CHANGELOG.",
          "Gerar a partir dos commits se eles seguirem convenção."),
     ], f"branch {'protegida' if protegido else 'desprotegida'}")
