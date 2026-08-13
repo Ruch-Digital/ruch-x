@@ -79,6 +79,30 @@ def env_or(cfg, key, env_name, default=None):
     return os.environ.get(env_name) or cfg.get(key) or default
 
 
+def nao_medido(out, campo, motivo):
+    """Marca um campo como NAO MEDIDO — e nao como medido-e-vazio.
+
+    A diferenca e a razao de existir de um relatorio de auditoria. `[]` diz
+    "varri e nao achei nada"; `None` diz "nao consegui varrer". Trocar um pelo
+    outro faz o painel dar criterio por atendido em cima de um comando que
+    morreu (visto no 1o uso real: settings inexistente no toml virava
+    "0 avisos de seguranca").
+    """
+    out[campo] = None
+    out.setdefault("nao_medido", {})[campo] = str(motivo)[:200]
+    return out
+
+
+def _motivo(rc, se):
+    """Motivo curto pro campo `nao_medido`, a partir do retorno de run()."""
+    if rc == 127:
+        return "comando nao encontrado"
+    if rc == 124:
+        return "timeout"
+    linhas = [ln.strip() for ln in (se or "").splitlines() if ln.strip()]
+    return linhas[-1][:200] if linhas else f"comando falhou (rc={rc})"
+
+
 # --------------------------------------------------------------------------
 # codigo: linhas, linguagens, distribuicao por app
 # --------------------------------------------------------------------------
@@ -610,6 +634,8 @@ def collect_django(root, cfg):
         for line in so.splitlines():
             if line.strip().startswith("[ ]"):
                 out["pending_migrations"].append(line.strip()[3:].strip())
+    else:
+        nao_medido(out, "pending_migrations", _motivo(rc, se))
 
     # `check --deploy` roda com o settings do AMBIENTE ATUAL. Em maquina de
     # dev isso significa avisar sobre DEBUG/SSL que so valem em producao —
@@ -631,17 +657,27 @@ def collect_django(root, cfg):
     rc, so, se = run([py, str(manage), "check", "--deploy"], cwd=root,
                      timeout=120, env=env_check)
     blob = so + se
-    # Separa o que e SEGURANCA (security.*) do que e recado de biblioteca
-    # (drf_spectacular, staticfiles...). Misturar os dois fazia o painel
-    # gritar "configuracao insegura" por causa de um schema de API — achado
-    # 2026-08-12: 10 "avisos de seguranca" e nenhum era de seguranca.
-    for m in re.finditer(r"^\?\:\s*\((\w+\.\w+)\)\s*(.+)$", blob, re.M):
-        item = {"code": m.group(1), "message": m.group(2).strip()[:200]}
-        alvo = "deploy_issues" if m.group(1).startswith("security.") else "other_issues"
-        out[alvo].append(item)
-    if not out["deploy_issues"]:
-        for m in re.finditer(r"\((security\.\w+)\)", blob):
-            out["deploy_issues"].append({"code": m.group(1), "message": ""})
+    # O returncode NAO serve de sinal: `check` sai 1 tambem quando RODOU e
+    # achou ERROR (medido em 2026-08-13 no ion — exit 1 por drf_spectacular
+    # com o security.W009 devidamente reportado). O sinal de que o comando
+    # chegou a medir e a saida ter FORMATO de check; um traceback nao tem.
+    rodou = bool(re.search(r"System check identified|^\?\:", blob, re.M))
+    if not rodou:
+        nao_medido(out, "deploy_issues", _motivo(rc, se))
+        nao_medido(out, "other_issues", _motivo(rc, se))
+    else:
+        # Separa o que e SEGURANCA (security.*) do que e recado de biblioteca
+        # (drf_spectacular, staticfiles...). Misturar os dois fazia o painel
+        # gritar "configuracao insegura" por causa de um schema de API —
+        # achado 2026-08-12: 10 "avisos de seguranca" e nenhum era de
+        # seguranca.
+        for m in re.finditer(r"^\?\:\s*\((\w+\.\w+)\)\s*(.+)$", blob, re.M):
+            item = {"code": m.group(1), "message": m.group(2).strip()[:200]}
+            alvo = "deploy_issues" if m.group(1).startswith("security.") else "other_issues"
+            out[alvo].append(item)
+        if not out["deploy_issues"]:
+            for m in re.finditer(r"\((security\.\w+)\)", blob):
+                out["deploy_issues"].append({"code": m.group(1), "message": ""})
 
     # contagem de models sem subir o Django: conta declaracoes em models.py
     model_count = app_count = 0
