@@ -1,17 +1,33 @@
 # ruch-x.toml — copie para a raiz do projeto e ajuste.
 # Tudo aqui é opcional. Sem este arquivo a coleta usa os padrões.
 # Segredo NUNCA entra aqui: DSN e tokens vêm de variável de ambiente.
+#
+# CAMINHO FORA DA RAIZ É RECUSADO. As chaves de caminho — manage_py, python,
+# apps_dir/modules_dir, coverage_file, coverage_json — são resolvidas DENTRO da
+# raiz do repositório e precisam existir. Absoluto ("/etc/passwd") e "../" caem
+# fora e voltam pro padrão; nunca viram argumento de comando.
 
 project = "meu-projeto"     # aparece como título do dashboard; padrão é o nome da pasta
 apps_dir = "apps"           # onde ficam os apps Django; se não existir, procura por apps.py
-manage_py = "manage.py"
+manage_py = "manage.py"     # ponto de entrada do Django; some o coletor inteiro se não resolver
+
+# Interpretador usado pro manage.py e pro `pip list --outdated` — o venv do
+# projeto. Fora da raiz é recusado e vale o interpretador de quem está auditando.
+# python = "venv/bin/python"        # Windows: "venv/Scripts/python.exe"
 
 # Rodar a suíte de testes durante a coleta. Deixe false e rode os testes no seu
 # fluxo normal com --cov-report=json — a coleta lê o coverage.json que sobra.
+# ATENÇÃO: true faz a coleta EXECUTAR a suíte do repositório (conftest.py é
+# código arbitrário). Não ligue em repositório de terceiro — veja docs/security.md.
 run_tests = false
-coverage_json = "coverage.json"
+coverage_json = "coverage.json"   # se este arquivo já existe, a suíte não é rodada
 pytest_args = ["-q", "--cov", "--cov-report=json", "--durations=10"]
-test_timeout = 900
+test_timeout = 900                # segundos até a suíte ser morta
+
+# Relatório de cobertura em caminho fora do convencional. Só JSON é lido por
+# aqui (formato coverage.py ou Istanbul); XML/lcov precisam estar num dos
+# caminhos padrão listados em docs/languages.md.
+# coverage_file = "build/coverage.json"
 
 # Janela do mapa de atrito. Projeto novo pede janela menor; legado pede maior.
 hotspot_window = "180 days ago"

@@ -5,9 +5,14 @@
 Um coletor é uma função `collect_x(root, cfg) -> dict` em `scripts/collect.py`.
 Quatro regras mantêm o conjunto confiável:
 
-1. **Levante exceção quando falhar.** O orquestrador captura e grava em
-   `errors[nome]`. Não devolva dicionário vazio em silêncio — o usuário precisa
-   distinguir "medi e deu zero" de "não consegui medir".
+1. **`None` é "não medido"; `0` e `[]` são "medi e está vazio".** Campo que a
+   ferramenta não conseguiu medir vai a `None` com o motivo registrado —
+   `nao_medido(out, "campo", _motivo(rc, se))`. O painel marca o critério como
+   *não auditado*, mostra o motivo e o tira do denominador da nota. Comando que
+   falhou virando `0` é o pior defeito possível: `[]` numa varredura de segredo
+   se lê como "o repositório está limpo".
+   **Levante exceção** quando o coletor inteiro não tem o que fazer (sem DSN,
+   sem binário) — o orquestrador captura e grava em `errors[nome]`.
 2. **Nunca escreva nada.** Coleta é leitura, no banco, no Docker e no repositório.
 3. **Respeite timeout.** Use o helper `run()`, que já limita tempo e não levanta
    por comando ausente.
@@ -47,7 +52,7 @@ texto como terceiro argumento. "sem dados" não ajuda ninguém; "sem coverage.js
 
 ## Mudança de schema
 
-O snapshot carrega `schema: 1`. Ao mudar a estrutura de forma incompatível,
+O snapshot carrega `schema: 2`. Ao mudar a estrutura de forma incompatível,
 incremente o número e trate a versão antiga no `render.py`. Snapshots velhos são
 o histórico — apagá-los para simplificar o código destrói a única coisa que a
 skill acumula com o tempo.

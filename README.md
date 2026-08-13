@@ -1,150 +1,208 @@
 # Ruch-X
 
-Auditoria de engenharia de um repositório, em **qualquer linguagem**: dá nota de
-A a F em cinco eixos, entrega um plano de ação priorizado e gera um **dashboard
-HTML que abre offline**, comparando com as coletas anteriores.
+Engineering audit of a repository, in **any language**: a grade from A to F on
+five axes, a prioritised action plan, and an **HTML dashboard that opens
+offline**, compared against previous collections.
 
-Funciona como [skill do Claude Code](https://docs.claude.com/en/docs/claude-code/skills)
-ou como dois scripts Python soltos — não precisa instalar nada no projeto medido.
+Runs as a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
+or as two plain Python scripts — nothing is installed into the project being
+measured.
 
-Ele responde o que um cliente paga pra ouvir: *"vocês entregam rápido e com
-segurança?"*, *"o que acontece quando quebra?"*, *"dá pra manter esse código no
-ano que vem?"*.
+It answers what a client is paying to hear: *"do you ship fast and safely?"*,
+*"what happens when it breaks?"*, *"can this code still be maintained next
+year?"*.
 
-## O veredito
+> **Security.** Ruch-X runs code from the project it audits — including its
+> `manage.py`. Only run it on repositories you trust; auditing third-party code
+> requires a container or a disposable VM. Full model, including what is *not*
+> protected: [`docs/security.md`](docs/security.md).
 
-Cinco eixos, cada um com nota e os critérios que a engenharia atual considera
-padrão — **DORA** (Accelerate / State of DevOps) para entrega, **OWASP** e
-**SLSA** para supply chain, **Google SRE** para confiabilidade:
+## The verdict
 
-| Eixo | O que audita |
+Five axes, each with a grade and the criteria that current engineering practice
+treats as standard — **DORA** (Accelerate / State of DevOps) for delivery,
+**OWASP** and **SLSA** for supply chain, **Google SRE** for reliability:
+
+| Axis | What it audits |
 |---|---|
-| **Entrega** | as 4 métricas DORA: frequência de deploy, lead time do commit até produção, taxa de falha de mudança, tempo de recuperação |
-| **Qualidade** | cobertura, complexidade e o arquivo de maior atrito |
-| **Segurança** | segredo commitado, action sem pin, `permissions` no workflow, dependência velha, atualização automática, avisos do framework |
-| **Confiabilidade** | CI verde, runbook de operação, migrations aplicadas, infraestrutura observável |
-| **Processo** | branch protegida, README, decisões documentadas, licença, pre-commit, changelog |
+| **Delivery** | the 4 DORA metrics: deploy frequency, lead time from commit to production, change failure rate, time to restore |
+| **Quality** | coverage, complexity, and the file with the most friction |
+| **Security** | committed secrets, unpinned actions, workflow `permissions`, outdated dependencies, automated updates, framework warnings |
+| **Reliability** | CI success, operational runbooks, applied migrations, observable infrastructure |
+| **Process** | protected branch, README, documented decisions, license, pre-commit, changelog |
 
-Cada desconto de nota vira uma linha do plano com **prioridade (P0/P1/P2)**, o
-que está errado e **como corrigir** — nota sem caminho é só nota baixa. Os
-limiares ficam explícitos em `auditoria()` no `render.py`, de propósito: numa
-auditoria o critério se discute, não se recebe de caixa-preta.
+Every lost point becomes a line in the plan with a **priority (P0/P1/P2)**, what
+is wrong, and **how to fix it** — a grade with no path is just a low grade. The
+thresholds are explicit in `auditoria()` in `render.py`, deliberately: in an
+audit the criterion is up for discussion, not handed down by a black box.
 
-Dois cuidados que estão no código porque nasceram de uso real: **segredo em
-arquivo de teste ou com placeholder não é vazamento** (senão o relatório perde a
-credibilidade no primeiro alarme falso), e **cobertura ausente conta como
-achado**, não como "não se aplica" — não medir é uma escolha com consequência.
+**A criterion the tool could not measure is reported as `null` — "not audited" —
+and drops out of the grade's denominator.** It neither rewards nor punishes, and
+an axis with nothing measurable gets no letter instead of an `F`. `0` and `[]`
+mean the opposite: measured, and empty. A report that cannot tell "we scanned
+and found no secrets" from "the scan never ran" is not an audit.
 
-## O que mais ele mede
+Two decisions that came out of real use: **a secret in a test file or with a
+placeholder value is not a leak** (one false alarm and the whole report loses
+credibility), and **missing coverage counts as a finding**, not as "not
+applicable" — choosing not to measure is a choice with a consequence.
 
-| Área | O que sai |
+## What else it measures
+
+| Area | Output |
 |---|---|
-| **Código** | linhas por linguagem e por módulo, proporção de teste, comentários |
-| **Qualidade** | violações de lint agrupadas por regra, complexidade ciclomática por função |
-| **Atrito** | mapa churn × complexidade — os arquivos que custam caro a cada mudança |
-| **Testes** | cobertura por módulo, contagem, duração, testes mais lentos |
-| **Git** | ritmo de commits, autores, idade do repositório |
-| **Banco** | tamanho, cache hit, índices ociosos, tabelas sem índice, bloat (Postgres) |
-| **Infra** | CPU e memória dos containers Docker (local ou host remoto por SSH) |
-| **CI** | taxa de sucesso e duração das execuções do GitHub Actions |
-| **Django** | migrations pendentes, avisos de segurança do `check --deploy`, models |
+| **Code** | lines per language and per module, test ratio, comments |
+| **Quality** | lint violations grouped by rule, cyclomatic complexity per function |
+| **Friction** | churn × complexity map — the files that cost you on every change |
+| **Tests** | coverage per module, count, duration, slowest tests |
+| **Git** | commit rhythm, authors, repository age |
+| **Database** | size, cache hit, unused indexes, tables missing indexes, bloat (PostgreSQL) |
+| **Infra** | CPU and memory of Docker containers (local or a remote host over SSH) |
+| **CI** | success rate and duration of GitHub Actions runs |
+| **Django** | pending migrations, `check --deploy` security warnings, models |
 
-Cada coletor é independente: se o Postgres estiver fora ou o `gh` não existir,
-os outros continuam e a falha vira um aviso no dashboard, não um erro fatal.
+Each collector is independent: if PostgreSQL is down or `gh` is missing, the
+others carry on and the failure becomes a warning in the dashboard, not a fatal
+error.
 
-## O mapa de atrito
+## The friction map
 
-É o gráfico que justifica a ferramenta existir. Cada bolha é um arquivo,
-posicionado por **quantas vezes mudou** (X) e **quão complexo é** (Y).
+This is the chart that justifies the tool. Each bubble is a file, placed by **how
+often it changed** (X) and **how complex it is** (Y).
 
-Linhas de código sozinhas não dizem nada: um arquivo de 2000 linhas que ninguém
-abre há um ano não custa nada. O que custa é o arquivo que muda toda semana e
-que ninguém entende — cada mudança ali é lenta e arriscada. Esses ficam no
-quadrante destacado, e são os únicos onde refatoração se paga.
+Lines of code alone say nothing: a 2000-line file nobody has opened in a year
+costs nothing. What costs is the file that changes every week and that nobody
+understands — every change there is slow and risky. Those sit in the highlighted
+quadrant, and they are the only place where refactoring pays for itself.
 
-## Uso
+## Usage
 
 ```bash
-python scripts/doctor.py     # diagnóstico: o que dá pra medir aqui e o que falta
-python scripts/collect.py    # grava .ruch-x/<data>.json
-python scripts/render.py --open   # gera e abre .ruch-x/dashboard.html
+python scripts/doctor.py          # diagnosis: what can be measured here, and what is missing
+python scripts/collect.py         # writes .ruch-x/<date>.json
+python scripts/render.py --open   # builds and opens .ruch-x/dashboard.html
 ```
 
-Rode na raiz do repositório que você quer medir. O `render.py` lê **todos** os
-snapshots da pasta, então quanto mais vezes rodar, mais úteis ficam as
-tendências — um snapshot só já gera o dashboard, apenas sem as setas de variação.
+Run it from the root of the repository you want to measure. `render.py` reads
+**every** snapshot in the directory, so the more often you run it, the more
+useful the trends get — a single snapshot still produces the dashboard, just
+without the deltas.
 
-Versione os `.ruch-x/*.json` (são pequenos e viram histórico) e mande o
-`dashboard.html` pro `.gitignore` — ele é derivado e regenera em um segundo.
+Commit `.ruch-x/*.json` (they are small, and they are the history) and add
+`dashboard.html` to `.gitignore` — it is derived and regenerates in a second.
 
-## Qualquer linguagem
+## Any language
 
-Contagem de linhas, mapa de atrito, git, banco, infraestrutura e CI funcionam em
-qualquer stack. O que varia por linguagem é a profundidade de duas seções:
+Line counting, the friction map, git, database, infrastructure and CI work on
+any stack. Two sections vary in depth by language:
 
-- **cobertura** — lê o relatório que sua suíte já exporta (coverage.py, Istanbul,
-  lcov, Cobertura, Go, JaCoCo);
-- **lint/complexidade** — `ruff` e `radon` no Python, `eslint` no JS.
+- **coverage** — reads the report your suite already exports (coverage.py,
+  Istanbul, lcov, Cobertura, Go, JaCoCo);
+- **lint / complexity** — `ruff` and `radon` for Python, `eslint` for JS.
 
-Sem nenhuma ferramenta externa instalada ele ainda roda: cai num contador de
-linhas próprio e numa aproximação de complexidade por contagem de ramificações.
+With no external tool installed at all it still runs: it falls back to its own
+line counter and to a branch-counting approximation of complexity.
 
-## Ferramentas opcionais
+## Optional tools
 
-Nada é obrigatório, mas cada ausência apaga um pedaço do painel — e o
-`doctor.py` diz exatamente qual:
+Nothing is required, but each absence blanks out part of the panel — and
+`doctor.py` tells you exactly which:
 
-| Ferramenta | O que habilita |
+| Tool | What it enables |
 |---|---|
-| `scc` ou `cloc` | contagem de linhas precisa por linguagem |
-| `radon` | complexidade real das funções Python |
-| `ruff` / `eslint` | violações de lint agrupadas por regra |
-| `psycopg[binary]` | seção inteira de banco |
-| `gh` | seção de CI |
-| `docker` | seção de infraestrutura |
+| `scc` or `cloc` | accurate line counting per language |
+| `radon` | real complexity of Python functions |
+| `ruff` / `eslint` | lint violations grouped by rule |
+| `psycopg[binary]` | the entire database section |
+| `gh` | CI, DORA and branch protection |
+| `docker` | the infrastructure section |
 
-## Configuração
+## Configuration
 
-Opcional. Crie `ruch-x.toml` na raiz do projeto medido — veja
-[`assets/ruch-x.toml.exemplo`](assets/ruch-x.toml.exemplo) comentado.
+Optional. Create `ruch-x.toml` in the root of the project being measured — see
+the commented [`assets/ruch-x.toml.exemplo`](assets/ruch-x.toml.exemplo), and
+[`docs/configuration.md`](docs/configuration.md) for every key.
 
 ```toml
-project = "meuprojeto"
+project = "myproject"
 modules_dir = "apps"
 
 [infra]
-docker_host = "ssh://root@meu-vps"   # Coolify, Easypanel ou VPS pura
-project_prefix = "meuprojeto"
+docker_host = "ssh://root@my-vps"   # Coolify, Easypanel or a bare VPS
 
 [django]
-settings_module = "meuprojeto.settings.production"
+settings_module = "myproject.settings.production"
 ```
 
-**Segredo nunca entra no toml.** O DSN do banco vem de variável de ambiente, e
-com usuário **somente leitura** — as consultas só tocam catálogo e estatística
-(`pg_stat_*`, `pg_settings`), nunca tabela de negócio:
+Path keys (`manage_py`, `python`, `apps_dir`/`modules_dir`, `coverage_file`,
+`coverage_json`) are resolved inside the repository root; absolute paths and
+`../` are refused.
+
+**Secrets never go in the toml.** The database DSN comes from an environment
+variable, and from a **read-only** user — the queries only touch catalogue and
+statistics (`pg_stat_*`, `pg_settings`), never a business table:
 
 ```bash
-export RUCHX_DATABASE_URL="postgresql://leitor:senha@host:5432/banco"
+export RUCHX_DATABASE_URL="postgresql://reader:password@host:5432/db"
 ```
 
-## Instalação como skill do Claude Code
+## Security
+
+Ruch-X executes `git`, `scc`/`cloc`, `ruff`, `radon`, `npx --no-install eslint`,
+`gh`, `docker`, `pip`, and — in a Django project — **the project's own
+`manage.py`**, which imports its settings, its apps and its `.env`, and opens a
+database connection. There is no isolation, and there is no way to audit a
+Django project without executing it.
+
+Run it on repositories you trust. For third-party code, use a container or a
+disposable VM.
+
+The snapshot is meant to be committed, so credentials are redacted recursively
+before it is written, and the secret scanner records only file, line and label —
+never the matched value. The dashboard is offline in the strict sense: no
+script tag, no remote font, no network request.
+
+[`docs/security.md`](docs/security.md) states all of it, including the honest
+list of what is **not** protected.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/security.md`](docs/security.md) | what gets executed, the threat model, what goes into the snapshot, what is not protected |
+| [`docs/criteria.md`](docs/criteria.md) | every criterion, weight, threshold and source; how the grade is computed |
+| [`docs/configuration.md`](docs/configuration.md) | complete `ruch-x.toml` and environment reference |
+| [`docs/languages.md`](docs/languages.md) | what runs on each stack, recognised coverage formats |
+| [`docs/extending.md`](docs/extending.md) | how to write a collector, and the contract it must honour |
+
+`SKILL.md` and `references/` are written in Portuguese: they are the instructions
+the agent reads while conducting the audit with the repository's owner.
+
+## Installing as a Claude Code skill
 
 ```bash
 git clone https://github.com/Ruch-Digital/ruch-x ~/.claude/skills/ruch-x
 ```
 
-Depois é só pedir: *"roda o raio-x deste projeto"*.
+Then just ask for it: *"run the x-ray on this project"*.
 
-## Rodando periodicamente
+## Running it periodically
 
-O valor aparece na série temporal. Um cron semanal ou um job de CI que roda a
-coleta e commita o snapshot bastam:
+The value shows up in the time series. A weekly cron job, or a CI job that
+collects and commits the snapshot, is enough:
 
 ```bash
-0 8 * * 1 cd /caminho/do/projeto && python scripts/collect.py --skip infra
+0 8 * * 1 cd /path/to/project && python scripts/collect.py --skip infra
 ```
 
-## Licença
+## Tests
 
-MIT — veja [LICENSE](LICENSE).
+```bash
+python3 -m unittest discover -s scripts/tests -t scripts/tests
+```
+
+82 tests, standard library only.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
