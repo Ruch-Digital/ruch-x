@@ -103,6 +103,51 @@ def _motivo(rc, se):
     return linhas[-1][:200] if linhas else f"comando falhou (rc={rc})"
 
 
+# Redacao do snapshot. A ferramenta manda VERSIONAR o snapshot, entao tudo que
+# entra nele e potencialmente publico. Os padroes ficam explicitos aqui — do
+# mesmo jeito que os limiares da auditoria — pra poderem ser discutidos e
+# estendidos por quem usa.
+#
+# O grupo de prefixo `(^|[^A-Za-z])` no padrao de atribuicao (chave=valor)
+# existe porque `\b` nao separa "_" de letra: sem ele, `DATABASE_PASSWORD=...`
+# nao seria pego (o "_" antes de "PASSWORD" nao e fronteira de palavra pro
+# regex). O prefixo capturado volta no replace pra nao comer o "_"/inicio.
+REDACOES = [
+    # senha embutida em URL/DSN: mantem usuario e host (diagnostico) e mata a senha
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://[^\s:@/]+:)[^\s@/]+(@)"), r"\1***\2"),
+    (re.compile(r"(?i)\b(PASSWORD)\s+'[^']*'"), r"\1 '***'"),
+    (re.compile(r"(?i)(^|[^A-Za-z])(password|passwd|senha|secret[_-]?key|api[_-]?key|token)"
+                r"(\s*[=:]\s*)([\"']?)[^\s\"';,]{6,}"), r"\1\2\3\4***"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "***"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "***"),
+    (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}"), "***"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "***"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "***"),
+]
+
+
+def redigir(texto):
+    """Mascara credencial em texto livre, preservando o resto legivel."""
+    if not isinstance(texto, str):
+        return texto
+    for padrao, troca in REDACOES:
+        texto = padrao.sub(troca, texto)
+    return texto
+
+
+def redigir_estrutura(obj):
+    """Aplica a redacao em TODA string do snapshot, recursivamente.
+
+    Feito na saida, uma vez, em vez de campo a campo: o proximo coletor que
+    alguem escrever nao precisa lembrar de redigir nada.
+    """
+    if isinstance(obj, dict):
+        return {k: redigir_estrutura(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redigir_estrutura(v) for v in obj]
+    return redigir(obj)
+
+
 # --------------------------------------------------------------------------
 # codigo: linhas, linguagens, distribuicao por app
 # --------------------------------------------------------------------------
@@ -998,7 +1043,13 @@ def collect_infra(root, cfg):
     if host:
         env["DOCKER_HOST"] = host
 
-    out = {"host": host or "local", "containers": [], "images": [], "disk": None}
+    # O host do docker vai pro snapshot versionado: guarda o esquema e o fato
+    # de ser remoto, nao `ssh://root@<ip>` do servidor de producao de alguem.
+    if host:
+        rotulo = f"{host.split('://', 1)[0]}://***" if "://" in host else "remoto"
+    else:
+        rotulo = "local"
+    out = {"host": rotulo, "containers": [], "images": [], "disk": None}
 
     fmt = "{{json .}}"
     rc, so, se = run(["docker", "stats", "--no-stream", "--format", fmt], env=env, timeout=60)
@@ -1477,6 +1528,19 @@ REGISTRY = {
 }
 
 
+def gravar_snapshot(snapshot, path, outdir):
+    """Redige e grava o snapshot em `path` e em `outdir/latest.json`.
+
+    Redacao na saida: o snapshot e versionado, entao nada que passe por aqui
+    pode carregar credencial (str(exc) de conexao, texto de query, host).
+    """
+    limpo = redigir_estrutura(snapshot)
+    corpo = json.dumps(limpo, indent=2, ensure_ascii=False, default=str)
+    path.write_text(corpo, encoding="utf-8")
+    (outdir / "latest.json").write_text(corpo, encoding="utf-8")
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser(description="Coleta metricas do projeto")
     ap.add_argument("--root", default=".")
@@ -1524,9 +1588,7 @@ def main():
     outdir.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d")
     path = Path(args.out) if args.out else outdir / f"{stamp}.json"
-    path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-    (outdir / "latest.json").write_text(
-        json.dumps(snapshot, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    gravar_snapshot(snapshot, path, outdir)
 
     print(f"\nsnapshot: {path}", file=sys.stderr)
     if snapshot["errors"]:
