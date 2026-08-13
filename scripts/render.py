@@ -584,6 +584,12 @@ def auditoria(snap):
     wf = wf_raw or {}
     sem_pin = _seguro(wf.get("sem_pin"), list) or []
     sem_perm = _seguro(wf.get("sem_permissions"), list) or []
+    # Dos workflows sem `permissions` no TOPO, quantos ja restringem o JOB que
+    # escreve (ex: `packages: write` no job de publish) — o criterio nao muda
+    # (o que protege TODOS os jobs e o bloco raiz), mas o achado nao pode ler
+    # "sem permissions" como "sem nada": 2 workflows com o job ja restrito e
+    # 1 sem restricao nenhuma sao problemas de tamanho bem diferente.
+    perm_no_job = _seguro(wf.get("permissions_no_job"), list) or []
     deps = _seguro(gov.get("dependencias"), dict, {})
     desatual = _seguro(deps.get("desatualizadas"), (int, float))
     total_deps = _seguro(deps.get("total"), (int, float))
@@ -606,8 +612,12 @@ def auditoria(snap):
          f"(ex: {sem_pin[0] if sem_pin else '—'}).",
          "Fixar no SHA do commit: tag pode ser reapontada e roda código novo dentro do seu CI, com seus secrets."),
         (2, None if wf_raw is None else len(sem_perm) == 0, "workflows com permissions declarado" + gov_rotulo, "P2",
-         f"{len(sem_perm)} workflow(s) sem bloco `permissions` — herdam token amplo.",
-         "Declarar `permissions:` com o mínimo necessário em cada workflow."),
+         f"{len(sem_perm)} workflow(s) sem bloco `permissions` no topo — herdam token amplo "
+         f"nos jobs que não o declaram."
+         + (f" {len(perm_no_job)} já restringe(m) o job que escreve (ex: `packages: write`), "
+            f"mas isso não protege os demais jobs do mesmo workflow." if perm_no_job else ""),
+         "Declarar `permissions:` com o mínimo necessário no topo do workflow — "
+         "o bloco no job protege só aquele job."),
         (2, None if pct_velhas is None else pct_velhas < 25,
          f"dependências atualizadas ({_valor(desatual)}/{_valor(total_deps)})"
          + ((_nao_medido(snap, "governance", "dependencias", "total")
@@ -622,14 +632,28 @@ def auditoria(snap):
         # DEBUG=True e falta de HSTS sao o esperado ali. Sem `[django]
         # settings_module` apontando producao, o criterio sai como "não
         # auditado" em vez de reprovar um sistema que pode estar correto.
+        #
+        # Mas apontar o settings_module de producao NAO torna a medicao uma
+        # foto da producao: o `check --deploy` sobe com as VARIAVEIS DE
+        # AMBIENTE da maquina de quem audita — a SECRET_KEY, senha e host
+        # reais vivem no gerenciador de segredos do deploy. O modulo e de
+        # producao; o ambiente e local. Sem dizer isso, um W009 (SECRET_KEY
+        # fraca) medido na maquina de quem audita lia como "producao insegura"
+        # quando pode ser so a maquina de dev sem a variavel exportada.
         (3, None if (sec_django is None or not dig(snap, "django", "ambiente_de_producao"))
             else len(sec_django) == 0,
          "avisos de segurança do framework"
          + (_nao_medido(snap, "django", "deploy_issues")
-            or ("" if dig(snap, "django", "ambiente_de_producao") else " (não auditado: settings de dev)")), "P1",
+            or ("" if dig(snap, "django", "ambiente_de_producao")
+                else " (não auditado: settings de dev)")), "P1",
          f"{len(sec_django or [])} aviso(s) de segurança no check de deploy "
-         f"(settings: {dig(snap, 'django', 'settings_module') or 'do ambiente'}).",
-         "Revisar HSTS, cookies seguros e redirect de SSL nos settings de produção."),
+         f"(módulo: {dig(snap, 'django', 'settings_module') or 'do ambiente'} — é o módulo de "
+         f"PRODUÇÃO, mas o AMBIENTE em que o check rodou é o local de quem auditou; avisos "
+         f"ligados a valor de variável de ambiente — chave, senha, host — precisam ser "
+         f"reconferidos no ambiente real, onde vive o segredo de verdade).",
+         "Revisar HSTS, cookies seguros e redirect de SSL — e reconferir no AMBIENTE REAL de "
+         "produção os avisos que dependem de valor de variável (ex: SECRET_KEY), já que este "
+         "check rodou com as variáveis de ambiente desta máquina, não as do deploy."),
     ], f"{_valor(n_seg)} segredo(s) · {_valor(n_pin)} action(s) sem pin")
 
     # ---------------- Confiabilidade ----------------
@@ -637,9 +661,17 @@ def auditoria(snap):
     runbooks = dig(snap, "governance", "docs", "runbooks")
     pend = _seguro(dig(snap, "django", "pending_migrations"), list)
     ci_ok = _seguro(dig(snap, "ci", "success_rate"), (int, float))
+    # A taxa CONTINUA sendo sucesso sobre concluido (sucesso+falha) — cancelar
+    # nao e falhar, as vezes e run substituido por um push seguinte. O que
+    # faltava e o rotulo nao deixar "CI verde 100%" esconder um cancelamento:
+    # run cancelado nao confirma que o pipeline passou (medido: job de teste
+    # cancelado aos 26min, job de deploy do MESMO run subiu do mesmo jeito).
+    ci_cancelados = _seguro(dig(snap, "ci", "cancelados"), (int, float))
+    ci_cancel_sufixo = (f" · {int(ci_cancelados)} cancelado(s)"
+                        if ci_cancelados else "")
     eixo("Confiabilidade", [
         (3, None if ci_ok is None else ci_ok >= 85,
-         f"CI verde ({_valor(ci_ok, '%')})"
+         f"CI verde ({_valor(ci_ok, '%')}{ci_cancel_sufixo})"
          + (_nao_auditado(snap, "ci", "success_rate") if ci_ok is None else ""), "P1",
          f"Pipeline verde em apenas {ci_ok}% das execuções.",
          "Pipeline instável faz o time ignorar vermelho — estabilizar antes de adicionar teste novo."),
@@ -671,6 +703,30 @@ def auditoria(snap):
     if protegido is None:
         bp_rotulo = (f" (não auditado: {bp['motivo']})"
                      if bp.get("motivo") else gov_rotulo)
+
+    # Licenca ausente so e achado em repositorio PUBLICO — o proprio texto do
+    # criterio ja dizia isso ("em repositorio privado e aceitavel") sem o
+    # codigo respeitar. `visibility` vem do mesmo `gh repo view` que alimenta
+    # `branch_protection` (`bp`), entao "nao apurei a visibilidade" e um
+    # estado real: sem `gh`, repo sem remote, ou API que falhou.
+    visibilidade = bp.get("visibility")
+    if visibilidade == "PRIVATE":
+        licenca_ok = None
+        licenca_rotulo = "licença (não se aplica: repositório privado)"
+    elif visibilidade == "PUBLIC":
+        licenca_ok = _do_gov(docs.get("licenca"))
+        licenca_rotulo = "licença" + gov_rotulo
+    else:
+        # Visibilidade desconhecida (sem gh, repo sem remote, API que falhou,
+        # ou o coletor `governance` nem rodou): mantem o comportamento de
+        # hoje — reprova arquivo ausente como sempre reprovou — mas o rotulo
+        # diz que a visibilidade nao foi apurada, pra nao ler como "publico
+        # confirmado". Quando `governance` nem rodou, `gov_rotulo` ja carrega
+        # o motivo generico; nao duplica a mensagem.
+        licenca_ok = _do_gov(docs.get("licenca"))
+        licenca_rotulo = "licença" + gov_rotulo + (
+            " (visibilidade do repositório não apurada)" if gov_raw is not None else "")
+
     eixo("Processo", [
         (4, protegido, "branch de produção protegida" + bp_rotulo, "P1",
          f"A branch `{bp.get('branch', 'main')}` aceita push direto, sem revisão nem check obrigatório.",
@@ -682,13 +738,19 @@ def auditoria(snap):
          "decisões documentadas" + gov_rotulo, "P2",
          "Sem registro de decisões técnicas (ADR ou pasta de docs).",
          "Registrar por que cada escolha estrutural foi feita — evita re-litigar decisão antiga."),
-        (1, _do_gov(docs.get("licenca")), "licença" + gov_rotulo, "P2",
+        (1, licenca_ok, licenca_rotulo, "P2",
          "Sem arquivo de licença — em repositório privado é aceitável; público, não.",
          "Adicionar LICENSE se o código for distribuído."),
-        (1, gov.get("pre_commit") or None, "hooks de pre-commit" + gov_rotulo, "P2",
+        # `pre_commit`/`changelog` sao medidos por EXISTENCIA de arquivo, do
+        # mesmo jeito que README/LICENSE/ADR: o coletor rodou e procurou.
+        # `_do_gov` ja cobre a unica excecao real (coletor `governance`
+        # inteiro fora do ar vira `None`/nao-auditado) — antes disso o
+        # `... or None` reconstruia "medi e nao existe" em "nao medido",
+        # tirando o criterio do denominador exatamente quando ele reprovaria.
+        (1, _do_gov(gov.get("pre_commit")), "hooks de pre-commit" + gov_rotulo, "P2",
          "Sem pre-commit: lint e formatação dependem de lembrete humano.",
          "Configurar pre-commit com o linter que já está no projeto."),
-        (2, bool(docs.get("changelog")) or None, "histórico de mudanças" + gov_rotulo, "P2",
+        (2, _do_gov(bool(docs.get("changelog"))), "histórico de mudanças" + gov_rotulo, "P2",
          "Sem CHANGELOG.",
          "Gerar a partir dos commits se eles seguirem convenção."),
     ], f"branch {_sim_nao(protegido, 'protegida', 'desprotegida', 'com proteção não auditada')}")
@@ -734,7 +796,9 @@ def findings(snap):
         settings_mod = dig(snap, "django", "settings_module") or "settings do ambiente"
         if prod:
             out.append(("alto", f"{len(issues)} aviso(s) de segurança do check --deploy "
-                                f"(settings de produção: {settings_mod})."))
+                                f"(módulo de produção: {settings_mod} — mas o AMBIENTE em que "
+                                f"rodou é o local de quem auditou; reconferir no ambiente real "
+                                f"os avisos ligados a valor de variável, como chave/senha/host)."))
         else:
             # Em dev, DEBUG e a falta de HSTS sao esperados — reportar como
             # falha de seguranca seria alarme falso.
@@ -780,6 +844,24 @@ def findings(snap):
     sucesso = dig(snap, "ci", "success_rate")
     if isinstance(sucesso, (int, float)) and sucesso < 85:
         out.append(("medio", f"CI verde em {sucesso}% das execuções. Pipeline instável treina o time a ignorar falha."))
+
+    # A taxa de CI verde ja exclui cancelado do calculo (cancelar nao e
+    # falhar) — mas "excluido do calculo" nao pode virar "nunca aconteceu".
+    # Um run cancelado nao confirma que o pipeline passou; o caso mais caro e
+    # o job de deploy do MESMO run ter subido antes do cancelamento acontecer
+    # (medido: job de teste cancelado aos 26min, deploy do mesmo run no ar).
+    cancelados = dig(snap, "ci", "cancelados")
+    if isinstance(cancelados, int) and cancelados > 0:
+        deploy_ok = _seguro(dig(snap, "ci", "cancelados_com_deploy_ok"), list) or []
+        if deploy_ok:
+            out.append(("alto", f"{len(deploy_ok)} run(s) de CI cancelado(s) tinham um job de "
+                                f"deploy CONCLUÍDO COM SUCESSO no mesmo run — o pipeline foi "
+                                f"tratado como \"verde\", mas o job que testava foi cancelado "
+                                f"antes de confirmar nada."))
+        else:
+            out.append(("medio", f"{cancelados} run(s) de CI cancelado(s) na janela medida. "
+                                 f"Cancelamento não é falha, mas também não confirma que o "
+                                 f"pipeline passou."))
 
     cx = dig(snap, "quality", "complexity", "above_10")
     if isinstance(cx, int) and cx > 0:

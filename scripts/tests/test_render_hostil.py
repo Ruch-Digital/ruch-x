@@ -847,5 +847,242 @@ class TestMinor6RotuloDoDjango(unittest.TestCase):
         self.assertIn("settings de dev", rot)
 
 
+# ----------------------------------------------------------------------
+# Calibragem de criterios (2026-08-13): verificacao independente achou 5
+# pontos onde o auditor MEDIA certo e ROTULAVA errado, ou descontava ponto
+# por criterio que nao se aplica.
+# ----------------------------------------------------------------------
+
+def _achados_do_eixo(snap, eixo):
+    """Lista de textos de achado (item [2]) de um eixo — so aparecem quando
+    o criterio correspondente reprovou (`ok is False`)."""
+    return [txt for prio, nome, txt, acao in render.auditoria(snap)[1] if nome == eixo]
+
+
+class TestAjuste1LicencaPrivadaNaoDesconta(unittest.TestCase):
+    """LICENSE ausente so e achado em repositorio PUBLICO — o proprio texto
+    do criterio ja dizia isso sem o codigo respeitar."""
+
+    @staticmethod
+    def _snap_licenca(visibility, licenca=None, governance_ok=True):
+        if not governance_ok:
+            return _snap(errors={"governance": "boom: falha inesperada"})
+        bp = {"disponivel": True, "branch": "main"}
+        if visibility is not None:
+            bp["visibility"] = visibility
+        return _snap(governance={
+            "docs": {"readme": "README.md", "licenca": licenca, "adr": None,
+                     "docs_dir": None, "runbooks": None, "changelog": None},
+            "branch_protection": bp,
+            "segredos_commitados": [], "workflows": {}, "dependencias": {},
+            "pre_commit": True,
+        })
+
+    def test_repo_privado_sem_licenca_nao_reprova(self):
+        rot, ok = _criterio(self._snap_licenca("PRIVATE", licenca=None), "Processo", "licença")
+        self.assertIsNone(ok, "PRIVATE tem que sair 'nao se aplica' (None), nunca reprovar")
+        self.assertIn("não se aplica: repositório privado", rot)
+
+    def test_repo_publico_sem_licenca_continua_reprovando(self):
+        """Guard contra sobrecorrecao: o ajuste 1 NAO pode fazer repo PUBLICO
+        parar de reprovar — so o PRIVATE muda."""
+        rot, ok = _criterio(self._snap_licenca("PUBLIC", licenca=None), "Processo", "licença")
+        self.assertIs(ok, False)
+        self.assertNotIn("não se aplica", rot)
+
+    def test_repo_publico_com_licenca_aprova(self):
+        _, ok = _criterio(self._snap_licenca("PUBLIC", licenca="LICENSE"), "Processo", "licença")
+        self.assertIs(ok, True)
+
+    def test_repo_privado_com_licenca_tambem_nao_reprova(self):
+        """PRIVATE com o arquivo presente continua 'nao se aplica' — o
+        criterio inteiro sai da conta, nao vira credito escondido."""
+        _, ok = _criterio(self._snap_licenca("PRIVATE", licenca="LICENSE"), "Processo", "licença")
+        self.assertIsNone(ok)
+
+    def test_visibilidade_desconhecida_mantem_comportamento_e_avisa(self):
+        """Sem `gh`/repo sem remote: `branch_protection` roda sem `visibility`.
+        O criterio continua reprovando arquivo ausente como sempre reprovou
+        — so o rotulo ganha o aviso de que a visibilidade nao foi apurada."""
+        rot, ok = _criterio(self._snap_licenca(None, licenca=None), "Processo", "licença")
+        self.assertIs(ok, False, "visibilidade desconhecida mantem o comportamento de hoje")
+        self.assertIn("visibilidade do repositório não apurada", rot)
+
+    def test_coletor_governance_fora_do_ar_nao_duplica_mensagem(self):
+        """Quando `governance` nem rodou, o motivo generico ja basta — nao
+        pode empilhar 'nao auditado: ...' junto com 'visibilidade nao apurada'."""
+        rot, ok = _criterio(self._snap_licenca(None, governance_ok=False),
+                            "Processo", "licença")
+        self.assertIsNone(ok)
+        self.assertIn("não auditado", rot)
+        self.assertNotIn("visibilidade do repositório não apurada", rot)
+
+
+class TestAjuste2PreCommitEChangelogReprovam(unittest.TestCase):
+    """`gov.get("pre_commit") or None` e `bool(changelog) or None` tiravam o
+    criterio MEDIDO-E-AUSENTE do denominador — o inverso do achado parqueado
+    (medicao vira credito) matando um achado real em vez de inventar um."""
+
+    @staticmethod
+    def _snap_gov(pre_commit, changelog):
+        return _snap(governance={
+            "docs": {"readme": "README.md", "licenca": "LICENSE", "adr": None,
+                     "docs_dir": None, "runbooks": None, "changelog": changelog},
+            "pre_commit": pre_commit,
+            "segredos_commitados": [], "workflows": {}, "dependencias": {},
+        })
+
+    def test_pre_commit_ausente_reprova(self):
+        _, ok = _criterio(self._snap_gov(False, None), "Processo", "hooks de pre-commit")
+        self.assertIs(ok, False, "medido e ausente tem que reprovar, nao sumir do denominador")
+
+    def test_pre_commit_presente_aprova(self):
+        _, ok = _criterio(self._snap_gov(True, None), "Processo", "hooks de pre-commit")
+        self.assertIs(ok, True)
+
+    def test_changelog_ausente_reprova(self):
+        _, ok = _criterio(self._snap_gov(False, None), "Processo", "histórico de mudanças")
+        self.assertIs(ok, False)
+
+    def test_changelog_presente_aprova(self):
+        _, ok = _criterio(self._snap_gov(False, "CHANGELOG.md"), "Processo", "histórico de mudanças")
+        self.assertIs(ok, True)
+
+    def test_coletor_governance_caido_continua_nao_auditado(self):
+        """Guard contra sobrecorrecao: o UNICO jeito de sair None e o coletor
+        `governance` inteiro nao ter rodado — esse caminho ja tinha teste
+        (`TestGovernanceAusenteNaoReprova`) e nao pode quebrar."""
+        sem_governance = _snap(errors={"governance": "boom: falha inesperada"})
+        _, ok_pre = _criterio(sem_governance, "Processo", "hooks de pre-commit")
+        _, ok_change = _criterio(sem_governance, "Processo", "histórico de mudanças")
+        self.assertIsNone(ok_pre)
+        self.assertIsNone(ok_change)
+
+    def test_nota_do_eixo_muda_quando_pre_commit_ausente(self):
+        """Prova ponta a ponta: antes do fix, dois snapshots com pre_commit
+        diferente batiam na MESMA nota (o criterio saia do denominador dos
+        dois). Agora a nota tem que DIFERIR."""
+        com = {x["nome"]: x for x in render.auditoria(self._snap_gov(True, "CHANGELOG.md"))[0]}
+        sem = {x["nome"]: x for x in render.auditoria(self._snap_gov(False, None))[0]}
+        self.assertNotEqual(com["Processo"]["pct"], sem["Processo"]["pct"])
+
+
+class TestAjuste3AchadoDePermissionsNoJob(unittest.TestCase):
+    """O criterio (bloco `permissions` no TOPO) nao muda — so o TEXTO do
+    achado, que agora diz quantos workflows ja restringem o job que escreve,
+    em vez de deixar o leitor concluir que ninguem tratou do assunto."""
+
+    @staticmethod
+    def _snap_wf(sem_permissions, permissions_no_job):
+        return _snap(governance={
+            "workflows": {"sem_pin": [], "sem_permissions": sem_permissions,
+                          "permissions_no_job": permissions_no_job},
+            "segredos_commitados": [], "dependencias": {},
+        })
+
+    def test_achado_menciona_quantos_ja_restringem_o_job(self):
+        snap = self._snap_wf(["a.yml", "b.yml", "c.yml"], ["a.yml", "b.yml"])
+        achados = _achados_do_eixo(snap, "Segurança")
+        achado = next(a for a in achados if "permissions" in a.lower() or "workflow(s) sem" in a)
+        self.assertIn("2", achado)
+        self.assertIn("job", achado.lower())
+
+    def test_sem_nenhum_job_restrito_nao_menciona_contagem_de_job(self):
+        """Guard contra sobrecorrecao: 0 workflows com job restrito nao pode
+        inventar uma frase de credito."""
+        snap = self._snap_wf(["a.yml"], [])
+        achados = _achados_do_eixo(snap, "Segurança")
+        achado = next(a for a in achados if "permissions" in a.lower() or "workflow(s) sem" in a)
+        self.assertNotIn("já restringe", achado)
+
+    def test_criterio_continua_sendo_o_bloco_no_topo(self):
+        """O ajuste nao pode mudar o `ok` — so o texto. Com `sem_permissions`
+        vazio (todos com bloco no topo) o criterio aprova, mesmo que nenhum
+        tenha `permissions_no_job` registrado."""
+        snap = self._snap_wf([], [])
+        _, ok = _criterio(snap, "Segurança", "workflows com permissions declarado")
+        self.assertIs(ok, True)
+
+
+class TestAjuste4AvisoDeSegurancaDizOAmbiente(unittest.TestCase):
+    """`security.W009` medido com o settings_module de PRODUCAO nao e a
+    postura de producao — as variaveis de ambiente sao as da maquina de quem
+    audita. O achado tinha o fato certo e a leitura enganosa."""
+
+    @staticmethod
+    def _snap_prod(issues):
+        return _snap(django={
+            "deploy_issues": issues, "other_issues": [],
+            "ambiente_de_producao": True, "settings_module": "projeto.settings.producao",
+        })
+
+    def test_achado_distingue_modulo_de_ambiente(self):
+        snap = self._snap_prod([{"code": "security.W009", "message": "SECRET_KEY fraca"}])
+        achados = _achados_do_eixo(snap, "Segurança")
+        achado = next(a for a in achados if "produ" in a.lower() and "seguran" in a.lower())
+        self.assertIn("produção", achado.lower())
+        self.assertIn("local", achado.lower())
+        self.assertIn("ambiente", achado.lower())
+
+    def test_acao_pede_reconferir_no_ambiente_real(self):
+        snap = self._snap_prod([{"code": "security.W009", "message": "SECRET_KEY fraca"}])
+        acoes = [acao for prio, nome, txt, acao in render.auditoria(snap)[1] if nome == "Segurança"]
+        acao = next(a for a in acoes if "ambiente" in a.lower())
+        self.assertIn("real", acao.lower())
+
+    def test_findings_tambem_distingue_modulo_de_ambiente(self):
+        snap = self._snap_prod([{"code": "security.W009", "message": "SECRET_KEY fraca"}])
+        itens = render.findings(snap)
+        achado = next(txt for nivel, txt in itens if "produ" in txt.lower() and "seguran" in txt.lower())
+        self.assertIn("local", achado.lower())
+
+    def test_dev_continua_sem_o_texto_de_ambiente_local(self):
+        """Guard contra sobrecorrecao: em dev o texto de hoje (achado alto
+        vs info) nao muda — so o caso PRODUCAO ganha o esclarecimento."""
+        snap = _snap(django={"deploy_issues": [{"code": "security.W009", "message": "x"}],
+                             "other_issues": [], "ambiente_de_producao": False})
+        itens = render.findings(snap)
+        nivel, _ = next((n, t) for n, t in itens if "DESENVOLVIMENTO" in t)
+        self.assertEqual(nivel, "info")
+
+
+class TestAjuste5CIVerdeComCancelado(unittest.TestCase):
+    """"CI verde 100%" nao pode esconder um run cancelado — cancelar nao e
+    falhar (a taxa continua igual), mas tambem nao confirma pipeline verde."""
+
+    @staticmethod
+    def _snap_ci(success_rate, cancelados, deploy_ok=None):
+        return _snap(ci={"success_rate": success_rate, "cancelados": cancelados,
+                         "cancelados_com_deploy_ok": deploy_ok or []})
+
+    def test_rotulo_mostra_cancelados_quando_maior_que_zero(self):
+        rot, ok = _criterio(self._snap_ci(100.0, 1), "Confiabilidade", "CI verde")
+        self.assertIn("cancelado", rot)
+        self.assertIs(ok, True, "a taxa em si continua decidindo o ok — cancelado nao reprova sozinho")
+
+    def test_rotulo_sem_cancelado_nao_menciona_a_palavra(self):
+        """Guard contra sobrecorrecao: sem cancelado, o rotulo fica como
+        sempre foi — sem a mudanca de nada alem do que era medido."""
+        rot, _ = _criterio(self._snap_ci(100.0, 0), "Confiabilidade", "CI verde")
+        self.assertNotIn("cancelado", rot)
+
+    def test_findings_emite_item_quando_ha_cancelado(self):
+        itens = render.findings(self._snap_ci(90.0, 2))
+        achado = next(t for _, t in itens if "cancelado" in t.lower())
+        self.assertIn("2", achado)
+
+    def test_findings_nao_emite_item_de_cancelado_quando_nao_ha(self):
+        itens = render.findings(self._snap_ci(90.0, 0))
+        self.assertFalse(any("cancelado" in t.lower() for _, t in itens))
+
+    def test_findings_destaca_cancelado_com_deploy_bem_sucedido(self):
+        """O caso que mais importa: cancelado cujo run tinha job de deploy
+        ja bem-sucedido — vira achado 'alto', nao 'medio' generico."""
+        snap = self._snap_ci(90.0, 1, deploy_ok=[{"workflow": "CI", "title": "run 1"}])
+        itens = render.findings(snap)
+        nivel, _ = next((n, t) for n, t in itens if "deploy" in t.lower() and "cancelado" in t.lower())
+        self.assertEqual(nivel, "alto")
+
+
 if __name__ == "__main__":
     unittest.main()

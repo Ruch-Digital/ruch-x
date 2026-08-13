@@ -223,15 +223,23 @@ collector reports `disponivel: false` with a `motivo`, and `protegido: null`.
 A collector that raises never reaches the snapshot at all — its error goes to
 `errors.<collector>`. The grade treats that as "not measured" too, which matters
 most for the criteria read out of `governance` by file existence (README,
-license, documented decisions, runbooks): a missing field there is
-indistinguishable from a missing file, so the absence of the collector is
-checked before the absence of the file. An exception must not turn into four
-accusations about a repository nobody looked at.
+license, documented decisions, pre-commit, changelog, runbooks): a missing
+field there is indistinguishable from a missing file, so the absence of the
+collector is checked before the absence of the file. An exception must not
+turn into a pile of accusations about a repository nobody looked at.
 
 In the dashboard the criterion is shown as *não auditado* with its reason, and
 it is removed from the denominator of the axis grade — it neither rewards nor
 punishes. An axis where nothing could be measured gets no letter at all; it does
 not become an `F`.
+
+**A third state, distinct from "not audited": not applicable.** The license
+criterion drops out of the denominator in a `PRIVATE` repository too, but for a
+different reason than "nobody looked" — the collector ran, read the file, and
+the criterion simply does not apply there (the finding itself says so: "em
+repositório privado é aceitável"). The dashboard labels it *não se aplica*
+rather than *não auditado* so the two are not read as the same excuse. See
+[criteria.md](criteria.md#process).
 
 **One deliberate exception: a missing coverage report is a finding, not "not
 audited."** Coverage never gets a `nao_medido` entry; when no report exists the
