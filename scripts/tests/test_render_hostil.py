@@ -365,7 +365,11 @@ class TestImportant5ClassesDeLixo(unittest.TestCase):
             code={
                 "total_loc": PAYLOAD, "total_files": PAYLOAD,
                 "by_app": [{"app": "x", "code": PAYLOAD, "tests": PAYLOAD, "test_ratio": PAYLOAD},
-                          "nao e dict"],
+                          "nao e dict",
+                          # inteiro gigante — JSON nao limita precisao de int,
+                          # e um total forjado (ou so muito errado) pode vir
+                          # maior que o float aguenta (round 2 do fix externo).
+                          {"app": "y", "code": 10**400, "tests": 10**300, "test_ratio": 0.5}],
             },
             stack={"detected": [1, 2, PAYLOAD], "dependencies": PAYLOAD},
             ci={
@@ -429,6 +433,73 @@ class TestImportant5ClassesDeLixo(unittest.TestCase):
         snap = _snap(db={"size": ["nao e dict", 123]})
         html = render.render([snap])
         self.assertIn("<html", html)
+
+
+# ----------------------------------------------------------------------
+# Fix round 2: regressao do proprio fix de robustez — milhar() com int
+# gigante
+# ----------------------------------------------------------------------
+
+class TestMilharOverflow(unittest.TestCase):
+    """`milhar()` (helper NOVO do round 1, criado pra fechar o Important 5)
+    usava `f"{v:,.0f}"` — o `.0f` forca conversao pra float antes de
+    formatar. JSON nao limita a precisao de um numero sem ponto/expoente, e
+    Python int nao tem limite de tamanho, mas float tem (~1.8e308). Um
+    total_loc/total_files/test_count/statements/code/tests/live_rows/
+    seq_scan/calls forjado (ou so muito errado) acima do limite do float
+    estourava `OverflowError`; um pouco abaixo disso, mas ainda grande,
+    perdia precisao SILENCIOSAMENTE (digito de lixo no dashboard, sem
+    excecao nenhuma pra avisar). O codigo ANTIGO (antes do round 1) usava
+    `f"{loc:,}"` — formatacao inteira nativa, sem essa conversao — entao a
+    funcao criada pra fechar a robustez introduziu um caso novo de crash.
+    """
+
+    def test_inteiro_gigante_nao_estoura_overflowerror(self):
+        # reproducao exata do relato da revisao: 10**400 e maior que
+        # qualquer float representavel (float('inf') comeca em ~1.8e308).
+        self.assertIsNotNone(render.milhar(10**400))
+
+    def test_render_com_total_loc_gigante_nao_derruba(self):
+        """Ponta a ponta: o mesmo `render.render([snap])` que a revisao
+        rodou pra provar o crash."""
+        snap = _snap(code={"total_loc": 10**400})
+        html = render.render([snap])
+        self.assertIn("<html", html)
+
+    def test_inteiro_grande_sem_perda_de_precisao(self):
+        """10**300 nao chega a estourar OverflowError, mas conversao pra
+        float perderia digitos por precisao — assere o VALOR formatado,
+        nao so a ausencia de excecao (a exigencia explicita do coordenador:
+        um teste que so checa "nao lancou excecao" deixaria passar o efeito
+        colateral de precisao que a revisao tambem descreveu)."""
+        valor = 10**300
+        resultado = render.milhar(valor)
+        # tira os pontos de milhar (separador BR) e compara com a
+        # representacao decimal exata do inteiro. Se tivesse passado por
+        # float, o resultado teria arredondamento/zeros de lixo em vez do
+        # digito 1 seguido de exatamente 300 zeros.
+        self.assertEqual(resultado.replace(".", ""), str(valor))
+        self.assertTrue(resultado.startswith("1."))
+
+    def test_float_legitimo_continua_formatado_como_antes(self):
+        """Mutacao inversa / nao-regressao: garante que o fix nao alterou o
+        caso normal — float de verdade (ex: media com casas decimais)
+        continua passando pelo caminho antigo (`.0f`, arredonda pra
+        inteiro)."""
+        self.assertEqual(render.milhar(1234.7), "1.235")
+
+    def test_carga_total_de_lixo_inclui_inteiro_gigante(self):
+        """O guard de robustez do round 1 (`_snapshot_lixo_total`) agora
+        tambem carrega um `10**400`/`10**300` dentro de `code.by_app` — este
+        teste isola so essa fatia, sem depender do resto da carga
+        combinada, pra apontar direto pro `milhar()` se quebrar nesse ponto
+        de novo."""
+        snap = _snap(code={"by_app": [
+            {"app": "y", "code": 10**400, "tests": 10**300, "test_ratio": 0.5},
+        ]})
+        html = render.render([snap])
+        self.assertIn("<html", html)
+        self.assertNotIn("<script", html)
 
 
 if __name__ == "__main__":

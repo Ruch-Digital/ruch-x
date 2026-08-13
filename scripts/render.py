@@ -71,12 +71,24 @@ def num(v, sufixo=""):
 
 
 def milhar(v):
-    """Numero inteiro com separador de milhar (ponto, padrao BR), ou None se
-    `v` nao for numero (snapshot forjado/malformado). O resultado so tem
-    digitos e ponto — nunca precisa passar por `e()`/`num()` depois, o
-    formato em si ja e seguro (e nunca lanca excecao)."""
+    """Numero com separador de milhar (ponto, padrao BR), ou None se `v`
+    nao for numero (snapshot forjado/malformado). O resultado so tem digitos
+    e ponto — nunca precisa passar por `e()`/`num()` depois, o formato em si
+    ja e seguro (e nunca lanca excecao).
+
+    `int` usa formatacao inteira nativa (`:,` sem `.0f`) — Python nao limita
+    o tamanho de um int, e JSON tambem nao limita a precisao de um numero
+    sem ponto/expoente, entao um snapshot forjado (ou so muito errado) pode
+    trazer um inteiro maior que o float aguenta. `:,.0f` converteria pra
+    float primeiro: acima de ~1.8e308 isso e `OverflowError`; abaixo disso
+    mas ainda grande, e perda de precisao silenciosa (digito de lixo no
+    dashboard). `float` continua pelo caminho antigo — um float ja e um
+    float, `.0f` nele so arredonda, nao reconverte nada.
+    """
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
+    if isinstance(v, int):
+        return f"{v:,}".replace(",", ".")
     return f"{v:,.0f}".replace(",", ".")
 
 
