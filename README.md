@@ -136,7 +136,9 @@ settings_module = "myproject.settings.production"
 
 Path keys (`manage_py`, `python`, `apps_dir`/`modules_dir`, `coverage_file`,
 `coverage_json`) are resolved inside the repository root; absolute paths and
-`../` are refused.
+`../` are refused. That bounds where Ruch-X can reach, not what it runs:
+`manage_py` and `python` name binaries that get executed, and the accepted value
+is by definition a file from the repository ([`docs/security.md`](docs/security.md)).
 
 **Secrets never go in the toml.** The database DSN comes from an environment
 variable, and from a **read-only** user — the queries only touch catalogue and

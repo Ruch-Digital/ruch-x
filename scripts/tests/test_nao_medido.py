@@ -62,6 +62,35 @@ class TestCheckDjango(unittest.TestCase):
             out = collect.collect_django(root, {"python": sys.executable})
         self.assertEqual(out["pending_migrations"], ["app.0002_novo"])
 
+    def test_projeto_sem_manage_py_nao_ganha_migrations_aplicadas(self):
+        """`[]` no retorno cedo virava CREDITO.
+
+        O criterio "migrations aplicadas" le `len(pend) == 0` e dava o ponto
+        por atendido em repositorio que nem Django e — sozinho, tirava o eixo
+        Confiabilidade de 0%/F pra 40%/D. Sem manage.py nao houve medicao.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"main.go": "package main\n"})
+            out = collect.collect_django(root, {})
+        self.assertIsNone(out["pending_migrations"])
+        motivo = out.get("nao_medido", {}).get("pending_migrations", "")
+        self.assertIn("sem manage.py", motivo)
+
+    def test_manage_py_configurado_que_nao_resolve_se_distingue_de_sem_django(self):
+        """Typo no toml nao pode se parecer com "projeto sem Django".
+
+        O manage.py da raiz EXISTE aqui: se a coleta caisse no default em
+        silencio, a configuracao quebrada ficaria invisivel. O motivo tem que
+        nomear a chave e o valor que nao resolveu.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"manage.py": MANAGE_QUE_MEDE})
+            out = collect.collect_django(root, {"manage_py": "backend/manage.py"})
+        self.assertIsNone(out["pending_migrations"])
+        motivo = out.get("nao_medido", {}).get("pending_migrations", "")
+        self.assertIn("manage_py configurado", motivo)
+        self.assertIn("backend/manage.py", motivo)
+
 
 @unittest.skipUnless(shutil.which("git"), "git ausente")
 class TestGit(unittest.TestCase):

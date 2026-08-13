@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
-.ruch-x/
-.metricas/
+# O dashboard e derivado (regenera em um segundo); os snapshots .json sao o
+# historico e devem ser versionados — e o que o README manda fazer.
+.ruch-x/dashboard.html
+.metricas/dashboard.html
 .venv/
 venv/

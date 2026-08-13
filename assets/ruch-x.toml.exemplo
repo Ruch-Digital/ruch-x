@@ -13,6 +13,9 @@ manage_py = "manage.py"     # ponto de entrada do Django; some o coletor inteiro
 
 # Interpretador usado pro manage.py e pro `pip list --outdated` — o venv do
 # projeto. Fora da raiz é recusado e vale o interpretador de quem está auditando.
+# ATENÇÃO: o valor aceito é EXECUTADO e vem de dentro do repositório — inclusive
+# com --skip django (o `pip list` é do coletor governance). Em repositório
+# alheio, leia esta chave antes de rodar. Detalhe em docs/security.md §6.
 # python = "venv/bin/python"        # Windows: "venv/Scripts/python.exe"
 
 # Rodar a suíte de testes durante a coleta. Deixe false e rode os testes no seu

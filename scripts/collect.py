@@ -757,8 +757,22 @@ def collect_django(root, cfg):
            "models": None, "version": None, "settings_module": None,
            "other_issues": []}
 
-    manage = caminho_contido(root, cfg.get("manage_py", "manage.py"))
+    configurado = cfg.get("manage_py")
+    manage = caminho_contido(root, configurado or "manage.py")
     if manage is None:
+        # Sair daqui com `pending_migrations = []` era CREDITO de graca: o
+        # criterio "migrations aplicadas" le `len(pend) == 0` e dava o ponto
+        # por atendido sem medicao nenhuma (sozinho, tirava o eixo
+        # Confiabilidade de 0%/F pra 40%/D num repositorio que nem Django e).
+        # Os dois motivos de cair aqui sao "nao medi", mas nao sao a mesma
+        # coisa pra quem le o painel: projeto sem Django e o esperado;
+        # `manage_py` do toml que nao resolve dentro da raiz e configuracao
+        # quebrada, e ficaria invisivel se os dois dessem o mesmo texto.
+        nao_medido(
+            out, "pending_migrations",
+            f"manage_py configurado ({configurado}) não resolve dentro do repositório"
+            if configurado else "projeto sem manage.py na raiz",
+        )
         return out
 
     # `python` do toml so vale se apontar pra dentro do repositorio (venv do

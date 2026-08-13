@@ -23,7 +23,7 @@ which uses `subprocess.run` with a list argv (no shell), a timeout, and the
 | `npx --no-install eslint . -f json` | `quality` | **runs the binary in the repo's `node_modules`** |
 | `python -P -m radon cc -j -s --ignore ... .` | `quality`, `git` | AST-based, does not import the code |
 | `python -P -m pytest <pytest_args>` | `tests` | **only when `run_tests = true`** |
-| `python -P -m pip list --outdated --format json` | `governance` | queries the configured package index |
+| `<python> -P -m pip list --outdated --format json` | `governance` | queries the configured package index |
 | `npm outdated --json` | `governance` | uses the repo's `.npmrc` |
 | `docker stats --no-stream`, `docker ps`, `docker system df` | `infra` | honours `DOCKER_HOST` |
 | `gh run list`, `gh repo view`, `gh api repos/<slug>/branches/<branch>/protection` | `ci`, `dora`, `governance` | your `gh` credentials |
@@ -32,6 +32,13 @@ which uses `subprocess.run` with a list argv (no shell), a timeout, and the
 
 `collect_db` also opens an outbound PostgreSQL connection with `psycopg` (or
 `psycopg2`) when a DSN is configured.
+
+`<python>` — in the `pip` row and in the two `manage.py` rows — is the
+interpreter running `collect.py`, **unless the repository's `ruch-x.toml` sets
+`python`**, in which case it is a file from the repository being audited. Note
+that the `pip` row belongs to `governance`, so it runs even with
+`--skip django`. See §6. The `radon` and `pytest` rows always use the
+interpreter running `collect.py`.
 
 ### The `manage.py` line
 
@@ -49,8 +56,11 @@ Ruch-X chose to measure it and to say so here.
 `python -P -m` is used for `radon`, `pytest` and `pip` so a `radon.py`,
 `pytest.py` or `pip.py` dropped in the audited repository's root cannot be
 imported as `__main__` instead of the real module. `manage.py` deliberately has
-**no** `-P`: it must import its own project. That is the boundary of what the
-tool can protect.
+**no** `-P`: it must import its own project.
+
+`-P` guards which *module* gets imported. It says nothing about which
+*interpreter* runs, and the toml's `python` key chooses that — including, if the
+repository wants, a file from the repository. Both boundaries are stated in §6.
 
 ## 2. Threat model
 
@@ -66,13 +76,27 @@ or untrusted code — real due diligence on someone else's repository — requir
 container or a disposable VM, with no credentials, no SSH agent, and no network
 access you care about. Nothing in this tool substitutes for that.
 
-If you cannot isolate, you can still reduce exposure:
+If you cannot isolate, you can reduce exposure — read the list as damage
+reduction, not as safety.
 
-- `--skip django` removes the two `manage.py` calls, and with them the only
-  place where the audited project's own code is imported;
-- `run_tests` stays `false` by default — leave it there for untrusted code;
-- `--only stack,code,git,governance` restricts the run to file reads, `git`
-  and `gh`.
+**Read the repository's `ruch-x.toml` before running anything.** It is the
+control surface: `python`, `manage_py`, `run_tests`, `pytest_args`,
+`[infra] docker_host` and `[db] dsn` decide what gets executed and what gets
+connected to. Delete or override what you did not put there.
+
+- `--skip django` removes the two `manage.py` calls. It does **not** remove
+  every execution of a repository-controlled binary: `python` from the toml is
+  also used by the `governance` collector, so a binary shipped in the repository
+  still runs (§6).
+- `run_tests` stays `false` by default. Leave it there for code you do not
+  trust, and do not let the repository's `pytest_args` stand.
+- `--skip infra,db` drops the outbound SSH and PostgreSQL connections that the
+  toml can aim at a host of its choosing.
+- `--only stack` is the only selection that is purely file reads. Adding `code`
+  brings in your own `scc`/`cloc`; adding `git` brings in `git` and `radon`;
+  adding `governance` brings in `git`, `gh`, `pip list --outdated` and
+  `npm outdated` — the last two reach the network, and `npm` reads the
+  repository's `.npmrc` to decide which registry that is.
 
 The result is a partial audit, and the dashboard says which criteria were not
 measured (see §5).
@@ -100,9 +124,10 @@ Fields that carry text from outside the tool:
 Two mechanisms keep credentials out.
 
 **Recursive redaction before writing.** `gravar_snapshot` runs
-`redigir_estrutura` over the whole structure — every string, at every depth, in
-both files. It is applied on the way out rather than field by field, so a new
-collector cannot forget it. The patterns live in `REDACOES` in `collect.py`,
+`redigir_estrutura` over the whole structure — every string **value**, at every
+depth, in both files. Dictionary keys are walked but not rewritten, so a
+collector must never use a secret as a key. It is applied on the way out rather
+than field by field, so a new collector cannot forget it. The patterns live in `REDACOES` in `collect.py`,
 explicit so they can be reviewed and extended. There are ten of them:
 
 | Input | Stored |
@@ -156,8 +181,9 @@ untrusted input.
   arithmetic, indexing or `.get()` runs.
 - `milhar()` formats large integers without going through `float`, so an
   oversized integer in a snapshot does not raise `OverflowError`.
-- A `.json` file that is malformed, or that is not a JSON object, is skipped
-  with a warning on stderr instead of aborting the render.
+- A `.json` file that fails to parse is skipped silently; one that parses but
+  is not a JSON object is skipped with a warning on stderr. Neither aborts the
+  render with a traceback.
 - If `.ruch-x` is a symlink, or `.ruch-x/dashboard.html` is a symlink, or the
   resolved output path falls outside the snapshot directory, `render.py`
   refuses to write and exits with a message. Writing through a symlink would
@@ -170,14 +196,22 @@ When a command fails, the field it would have filled is set to `null` and the
 reason is recorded in `nao_medido: {field: reason}`. `0` and `[]` mean "measured,
 and there was nothing"; `null` means "could not measure".
 
-This applies to the Django check, pending migrations, the secret scan, git
-metrics, hotspots, line counts (both `scc` and `cloc`), coverage, branch
-protection and complexity.
+This applies to the Django check, pending migrations (including a project with
+no `manage.py`, and a `manage_py` in the toml that does not resolve), the secret
+scan, git metrics, hotspots, line counts (both `scc` and `cloc`) and complexity.
+Branch protection follows the same contract through a different shape: the
+collector reports `disponivel: false` with a `motivo`, and `protegido: null`.
 
 In the dashboard the criterion is shown as *não auditado* with its reason, and
 it is removed from the denominator of the axis grade — it neither rewards nor
 punishes. An axis where nothing could be measured gets no letter at all; it does
 not become an `F`.
+
+**One deliberate exception: a missing coverage report is a finding, not "not
+audited."** Coverage never gets a `nao_medido` entry; when no report exists the
+criterion fails and produces a P1. Choosing not to measure coverage is a fact
+about the project, not a limitation of the tool. See
+[criteria.md](criteria.md).
 
 This is not cosmetic. A report that cannot tell "we scanned the repository and
 found no committed secrets" from "the scan never ran" is worthless as an audit,
@@ -191,9 +225,22 @@ consequences of the threat model in §2.
 
 - **The audited project's `manage.py` is executed** — by design, twice per run.
   It imports settings, apps and `.env` and opens a database connection.
+- **`python` in the toml names the binary that Ruch-X executes,** and it is
+  required to live inside the repository. A repository that ships
+  `python = "tools/whatever"` gets that file executed, as your user. It is used
+  in two places, and only one of them is Django: `manage.py`, and
+  `pip list --outdated` in the `governance` collector. **It therefore survives
+  `--skip django`,** and it needs neither Django nor `run_tests`. Proven with a
+  fake repository: the shipped binary was invoked as
+  `tools/fakepy -P -m pip list --outdated --format json`. The `-P` protects the
+  module, not the interpreter — when the interpreter itself is the repository's
+  file, there is nothing left to protect.
 - **`run_tests`, `pytest_args` and `test_timeout` come from the repository's own
   `ruch-x.toml`.** With `run_tests = true`, collection runs the repository's test
-  suite, and `conftest.py` is arbitrary code. The default is `false`.
+  suite, and `conftest.py` is arbitrary code. It is also the one path where
+  collection **writes** into the audited tree: the suite writes whatever it
+  writes, and `--cov-report=json` leaves `coverage.json` and `.coverage` behind.
+  The default is `false`.
 - **`npx --no-install eslint` runs the binary that shipped in the repository's
   `node_modules`,** with the repository's `eslint.config.js`.
 - **The entire environment is passed to every subprocess.** `GITHUB_TOKEN`,
@@ -209,11 +256,14 @@ consequences of the threat model in §2.
 - **File reads have no size ceiling in most places.** The 1.5 MB cap exists only
   in the secret scanner. Line counting, module sizing and hotspot measurement
   read whatever is on disk.
-- **Path containment covers the toml's path keys, not every input.**
-  `manage_py`, `python`, `apps_dir`/`modules_dir`, `coverage_file` and
-  `coverage_json` are resolved inside the repository root and refused if they are
-  absolute or escape via `../` (see [configuration.md](configuration.md)). Other
-  values in the toml are not paths and get no such treatment.
+- **Path containment is a blast radius, not a shield.** `manage_py`, `python`,
+  `apps_dir`/`modules_dir`, `coverage_file` and `coverage_json` are resolved
+  inside the repository root, and absolute paths and `../` are refused (see
+  [configuration.md](configuration.md)). That keeps Ruch-X from reaching *out* of
+  the repository — `manage_py = "/etc/passwd"`, `apps_dir = "/"`. It does nothing
+  about what is *inside* it. For `manage_py` and `python` the contained path is
+  precisely what gets executed: containment is the trigger, not the protection.
+  Other values in the toml are not paths and get no such treatment.
 
 ## 7. Reporting a vulnerability
 

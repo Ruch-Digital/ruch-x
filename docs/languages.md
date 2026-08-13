@@ -45,15 +45,21 @@ modules_dir = "services"
 Ruch-X generates no coverage report. It reads what your suite already exports.
 Recognised formats, in the order they are tried:
 
-| Format | File | How to generate |
-|---|---|---|
-| coverage.py | `coverage.json` | `pytest --cov --cov-report=json` |
-| Istanbul (jest, vitest) | `coverage/coverage-summary.json` | `vitest run --coverage` |
-| Istanbul, detailed | `coverage/coverage-final.json` | same |
-| lcov | `coverage/lcov.info`, `lcov.info` | default in many JS and Rust runners |
-| Cobertura XML | `coverage.xml`, `cobertura.xml` | PHPUnit, .NET, `pytest-cov --cov-report=xml` |
-| Go | `coverage.out` | `go test ./... -coverprofile=coverage.out` |
-| JaCoCo | `target/site/jacoco/jacoco.xml` | `mvn test jacoco:report` |
+| # | File | Format | How to generate |
+|---|---|---|---|
+| 1 | `coverage.json` | coverage.py | `pytest --cov --cov-report=json` |
+| 2 | `coverage/coverage-summary.json` | Istanbul (jest, vitest) | `vitest run --coverage` |
+| 3 | `coverage/coverage-final.json` | Istanbul, detailed | same |
+| 4 | `coverage/lcov.info` | lcov | default in many JS and Rust runners |
+| 5 | `lcov.info` | lcov | same |
+| 6 | `coverage.xml` | Cobertura | PHPUnit, .NET, `pytest-cov --cov-report=xml` |
+| 7 | `coverage.out` | Go | `go test ./... -coverprofile=coverage.out` |
+| 8 | `cobertura.xml` | Cobertura | same as 6 |
+| 9 | `target/site/jacoco/jacoco.xml` | JaCoCo | `mvn test jacoco:report` |
+
+The first entry that exists **and parses** wins; one that exists but cannot be
+read is skipped and the search continues. `coverage_file`, when set, is tried
+before all nine.
 
 The report's **age** is measured from the file's mtime and shown in the
 dashboard when it is older than 14 days. Coverage read off a three-month-old

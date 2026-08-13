@@ -110,7 +110,7 @@ chain.
 | Actions pinned to a SHA | 3 | P1 | no `uses:` with a moving ref | the `governance` collector did not run |
 | Workflows declare `permissions` | 2 | P2 | every workflow has a top-level `permissions:` | idem |
 | Dependencies up to date | 2 | P2 | fewer than 25 % outdated | `pip`/`npm` could not produce both counts |
-| Automated dependency updates | 2 | P2 | `.github/dependabot.yml` or `.github/renovate.json` exists | — |
+| Automated dependency updates | 2 | P2 | `.github/dependabot.yml` or `.github/renovate.json` exists | the `governance` collector raised |
 | Framework security warnings | 3 | P1 | `check --deploy` reported no `security.*` | `check --deploy` did not run, **or** `[django] settings_module` is unset |
 
 Three details that decide whether the report is believable:
@@ -139,16 +139,19 @@ Source: Google SRE for the operational items.
 |---|---|---|---|
 | CI green | 3 | success rate ≥ 85 % | no GitHub Actions data |
 | Operational runbook | 3 | `docs/runbooks/`, `runbooks/` or `docs/deploy/runbooks/` contains any `.md` | — |
-| Migrations applied | 2 | no pending migration | `showmigrations` failed |
+| Migrations applied | 2 | no pending migration | `showmigrations` failed, the project has no `manage.py`, or the toml's `manage_py` does not resolve inside the root |
 | Observable infrastructure | 2 | container or database metrics were collected | nothing was collected — this criterion never fails, it only counts when present |
 
 Below 85 % green, a team learns to ignore red. That is the reason the threshold
 is where it is: an unstable pipeline is worse than no pipeline, because it
 trains people to merge past it.
 
-**Caveat on migrations:** the criterion reads `django.pending_migrations`, which
-is an empty list both when there is nothing pending and when the project has no
-`manage.py` at all. In a non-Django repository it is therefore counted as met.
+**On migrations:** the criterion used to be counted as met in any repository
+without a `manage.py`, because "no Django" and "no pending migration" both
+arrived as an empty list. They are now distinguished: with no `manage.py` the
+field is `null` and the reason says so, and a `manage_py` configured in the toml
+that does not resolve gets a different reason — a typo in the config must not
+look like a project that simply is not Django.
 
 ## Process
 
@@ -163,6 +166,13 @@ is an empty list both when there is nothing pending and when the project has no
 
 Branch protection is the heaviest single criterion of the axis because it is the
 only one that does not depend on anyone's discipline.
+
+**The file-existence criteria have no "not audited" state of their own.** README,
+documented decisions, license and the operational runbook read a field of the
+`governance` collector, and a missing field is indistinguishable from a missing
+file. If the whole collector raised — its error is listed in the dashboard's
+findings — those criteria report as *not met* rather than *not audited*. Check
+`errors.governance` before taking "no README" at face value.
 
 A **404** from the protection endpoint is the answer that matters: the branch has
 no protection. Any other failure — 403, rate limit, network — leaves the

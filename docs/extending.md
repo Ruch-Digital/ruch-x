@@ -55,10 +55,16 @@ one measurement failed".
 
 ### 4. Read only, and always with a timeout
 
-Collection never writes to the project, the database or the Docker host. Use the
-`run()` helper: it takes a list argv (never a shell string), enforces a timeout,
-and never raises — a missing binary comes back as `rc = 127`, a timeout as
-`rc = 124`.
+A collector never writes to the project, the database or the Docker host. Use
+the `run()` helper: it takes a list argv (never a shell string), enforces a
+timeout, and never raises — a missing binary comes back as `rc = 127`, a timeout
+as `rc = 124`.
+
+One existing exception, and it is opt-in: with `run_tests = true` the `tests`
+collector runs the project's own suite, which writes whatever that suite writes
+— `coverage.json` and `.coverage` in the project root, at least. Do not add a
+second exception. If a new collector needs a file, it belongs in `.ruch-x/`, not
+in the audited tree.
 
 If you invoke a Python module, use `python -P -m <module>` so a same-named file
 in the audited repository's root cannot shadow the real one.

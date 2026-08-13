@@ -46,8 +46,13 @@ class TestCaminhoContido(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = fake_repo(tmp, **{"manage.py": "import sys; sys.exit(0)\n"})
             out = collect.collect_django(root, {"manage_py": "/etc/passwd"})
-        self.assertEqual(out["pending_migrations"], [])
+        # `apps is None` prova que o retorno cedo aconteceu (a contagem de
+        # models/apps roda depois). E o campo sai como NAO MEDIDO: `[]` aqui
+        # o painel leria como "medi e nao ha migration pendente" — credito de
+        # graca em cima de uma configuracao recusada.
         self.assertIsNone(out["apps"])
+        self.assertIsNone(out["pending_migrations"])
+        self.assertIn("/etc/passwd", out.get("nao_medido", {}).get("pending_migrations", ""))
 
 
 class TestFlagPFechaSysPath(unittest.TestCase):
