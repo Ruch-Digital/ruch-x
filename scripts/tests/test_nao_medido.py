@@ -764,5 +764,79 @@ class TestAjuste5CIComCancelado(unittest.TestCase):
         self.assertEqual(out["cancelados_com_deploy_ok"], [])
 
 
+class TestFixRound1PortaoNoNomeDoJob(unittest.TestCase):
+    """Achado da revisao (fix round 1): `_e_deploy` foi desenhada pra nome de
+    WORKFLOW, e o ajuste 5 a reaplicava sobre nome de JOB sem hedge
+    equivalente. Job de PORTAO (decide SE o deploy roda) nao e o deploy — e o
+    proprio ion tem um chamado "Checks rapidos (gate de deploy)", que batia
+    com "deploy" no nome e virava uma afirmacao categorica de que algo tinha
+    sido implantado."""
+
+    def test_job_parece_deploy_rejeita_o_caso_exato_do_ion(self):
+        self.assertFalse(
+            collect._job_parece_deploy("Checks rapidos (gate de deploy)", {}))
+
+    def test_job_parece_deploy_aceita_o_caso_legitimo(self):
+        self.assertTrue(
+            collect._job_parece_deploy("Deploy staging (webhooks Coolify)", {}))
+
+    def test_job_parece_deploy_rejeita_outras_palavras_de_portao(self):
+        for nome in ("Lint e deploy check", "Testes (deploy gate)", "Checks de deploy"):
+            self.assertFalse(collect._job_parece_deploy(nome, {}), nome)
+
+    def test_job_parece_deploy_ainda_aceita_nome_de_deploy_sem_ambiguidade(self):
+        for nome in ("Deploy", "Release para producao", "cd"):
+            self.assertTrue(collect._job_parece_deploy(nome, {}), nome)
+
+    def test_job_de_deploy_bem_sucedido_nao_dispara_no_caso_do_ion(self):
+        """Ponta a ponta: o job de gate do ion, mesmo `success`, nao conta."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            jobs = [{"name": "Checks rapidos (gate de deploy)", "conclusion": "success"}]
+            with mock.patch.object(
+                    collect, "run",
+                    return_value=(0, json.dumps({"jobs": jobs}), "")):
+                out = collect._job_de_deploy_bem_sucedido(root, 123, {})
+        self.assertFalse(out)
+
+    def test_job_de_deploy_bem_sucedido_continua_disparando_no_caso_legitimo(self):
+        """Mutacao inversa: job realmente chamado de deploy continua contando."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            jobs = [{"name": "Deploy staging (webhooks Coolify)", "conclusion": "success"}]
+            with mock.patch.object(
+                    collect, "run",
+                    return_value=(0, json.dumps({"jobs": jobs}), "")):
+                out = collect._job_de_deploy_bem_sucedido(root, 123, {})
+        self.assertTrue(out)
+
+    def test_collect_ci_ponta_a_ponta_nao_sinaliza_o_gate_do_ion(self):
+        """O mesmo caso, mas passando pelo `collect_ci` inteiro (`gh run
+        list` + `gh run view`) — nao so pela funcao isolada."""
+        base = "2026-08-13T09:00:00Z"
+        runs = [{"conclusion": "cancelled", "createdAt": base, "updatedAt": base,
+                "displayTitle": "run 0", "workflowName": "CI", "headBranch": "main",
+                "event": "push", "databaseId": 2000}]
+        jobs = {2000: [{"name": "Checks rapidos (gate de deploy)", "conclusion": "success"},
+                       {"name": "Testes", "conclusion": "cancelled"}]}
+
+        def fake_run(cmd, *args, **kwargs):
+            if "run" in cmd and "list" in cmd:
+                return 0, json.dumps(runs), ""
+            if "run" in cmd and "view" in cmd:
+                run_id = int(cmd[cmd.index("view") + 1])
+                return 0, json.dumps({"jobs": jobs.get(run_id, [])}), ""
+            raise AssertionError(f"comando inesperado: {cmd}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run", side_effect=fake_run):
+                out = collect.collect_ci(root, {})
+        self.assertEqual(out["cancelados"], 1)
+        self.assertEqual(out["cancelados_com_deploy_ok"], [],
+                         "job de gate nao pode disparar o achado de deploy bem-sucedido")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1234,6 +1234,30 @@ def collect_infra(root, cfg):
 # dia cancelado por um push seguinte) nao multiplicar chamadas de API.
 LIMITE_CANCELADOS_CHECADOS = 8
 
+# `_e_deploy()` foi desenhada pra nome de WORKFLOW, onde "deploy" no nome
+# quase sempre significa que o workflow FAZ o deploy. Reaplicada sobre nome
+# de JOB isso quebra: um job de PORTAO decide SE o deploy roda, nao faz o
+# deploy — e o proprio ion tem um chamado "Checks rapidos (gate de deploy)".
+# Sem esta lista, aquele job (cancelado ou nao, tanto faz — o que importa
+# aqui e o CONCLUIDO com sucesso) casava com "deploy" e virava uma afirmacao
+# categorica de que algo foi implantado, quando o job nem chegou perto disso.
+# Nome com qualquer uma destas palavras VENCE "deploy" no mesmo nome — falso
+# negativo aqui (nao contar um deploy de verdade com nome ambiguo) e mais
+# barato que falso positivo (afirmar deploy que nao aconteceu).
+PALAVRAS_DE_PORTAO_NO_JOB = ("gate", "check", "checks", "lint", "test")
+
+
+def _job_parece_deploy(nome_job, cfg):
+    """Nome de job que sugere ter EXECUTADO o deploy — nao so decidido se ele
+    roda. Ver `PALAVRAS_DE_PORTAO_NO_JOB`: um job "Checks rapidos (gate de
+    deploy)" nao pode contar so por ter "deploy" no nome; um job "Deploy
+    staging (webhooks Coolify)" continua contando normalmente.
+    """
+    nome = (nome_job or "").lower()
+    if any(palavra in nome for palavra in PALAVRAS_DE_PORTAO_NO_JOB):
+        return False
+    return _e_deploy(nome_job, cfg)
+
 
 def _job_de_deploy_bem_sucedido(root, run_id, cfg):
     """True se o run cancelado teve algum JOB concluido com SUCESSO cujo nome
@@ -1242,6 +1266,10 @@ def _job_de_deploy_bem_sucedido(root, run_id, cfg):
     MESMO run, ja tinha terminado bem antes disso. `None` quando nao foi
     possivel checar (gh falhou, timeout, saida ilegivel) — nunca vira "nao
     tinha deploy" por engano.
+
+    O nome do job e SINAL, nao prova: `success` e medido, "e um job de
+    deploy" e inferido do nome (ver `_job_parece_deploy`). Quem le o achado
+    precisa do mesmo hedge — texto em `render.py`.
     """
     if not run_id:
         return None
@@ -1256,7 +1284,8 @@ def _job_de_deploy_bem_sucedido(root, run_id, cfg):
     if not isinstance(jobs, list):
         return None
     return any(
-        isinstance(j, dict) and j.get("conclusion") == "success" and _e_deploy(j.get("name"), cfg)
+        isinstance(j, dict) and j.get("conclusion") == "success"
+        and _job_parece_deploy(j.get("name"), cfg)
         for j in jobs
     )
 

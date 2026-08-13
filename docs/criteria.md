@@ -150,13 +150,28 @@ trains people to merge past it.
 (`success + failure`) — cancelling is not the same as failing, and is often a
 run superseded by a later push. But a cancelled run does not confirm the
 pipeline passed either, and hiding it let "CI green 100 %" cover a real
-incident: a test job cancelled 26 minutes in, while the deploy job of the
-*same* run had already shipped to staging. The collector now records how many
-runs were cancelled in the window; the criterion's label shows the count when
-it is greater than zero (`CI green (100 % · 1 cancelled)`), and `findings()`
-adds a line explaining that a cancelled run is not evidence of a green
-pipeline. When it can tell cheaply, it also flags the sharper case: a
-cancelled run whose *same-run* deploy job had already concluded successfully.
+incident: a test job cancelled 26 minutes in, while a job named like a
+deploy, in the *same* run, had already shipped to staging. The collector now
+records how many runs were cancelled in the window; the criterion's label
+shows the count when it is greater than zero (`CI green (100 % · 1
+cancelled)`), and `findings()` adds a line explaining that a cancelled run is
+not evidence of a green pipeline.
+
+When it can tell cheaply, it also flags the sharper case: a cancelled run
+that had, in the same run, a job whose *name* suggests deploy with
+conclusion `success`. That wording is deliberate — the job's `success` is
+measured, but "it was a deploy job" is inferred from its name, and a job
+name is a weak signal on its own. A gate job that only decides *whether* a
+deploy runs is not the deploy: the collector excludes any job name
+containing `gate`, `check`, `checks`, `lint` or `test` from this check even
+when it also contains `deploy` (a real false positive found in review: a job
+named "Checks rápidos (gate de deploy)"). When a name is ambiguous beyond
+that, the check simply does not fire — a missed real deploy costs less here
+than a false accusation. The finding stays `alto` even with the hedge: the
+filter already removes the known false-positive shape, and what remains — a
+cleanly deploy-named job concluding successfully while the same run's test
+job never confirmed anything — is structurally the incident that motivated
+this check in the first place.
 
 **On migrations:** the criterion used to be counted as met in any repository
 without a `manage.py`, because "no Django" and "no pending migration" both

@@ -1084,5 +1084,45 @@ class TestAjuste5CIVerdeComCancelado(unittest.TestCase):
         self.assertEqual(nivel, "alto")
 
 
+class TestFixRound1TextoDoJobDeployNaoAfirmaFato(unittest.TestCase):
+    """Achado da revisao: o texto dizia "tinham um job de deploy CONCLUIDO
+    COM SUCESSO" como fato apurado — mas "e um job de deploy" e inferencia
+    de NOME (o coletor so mede `conclusion == "success"`). O texto tem que
+    hedgear ("cujo nome sugere deploy"), sem deixar de apontar o que
+    realmente importa: pipeline tratado como verde sem confirmacao."""
+
+    @staticmethod
+    def _snap_com_deploy_ok():
+        return _snap(ci={"success_rate": 90.0, "cancelados": 1,
+                         "cancelados_com_deploy_ok": [{"workflow": "CI", "title": "run 1"}]})
+
+    def test_texto_nao_afirma_deploy_como_fato_apurado(self):
+        itens = render.findings(self._snap_com_deploy_ok())
+        achado = next(t for _, t in itens if "cancelado" in t.lower() and "deploy" in t.lower())
+        self.assertNotIn("um job de deploy concluído com sucesso", achado.lower())
+        self.assertNotIn("um job de deploy concluido com sucesso", achado.lower())
+
+    def test_texto_hedgeia_que_e_o_nome_que_sugere_deploy(self):
+        itens = render.findings(self._snap_com_deploy_ok())
+        achado = next(t for _, t in itens if "cancelado" in t.lower() and "deploy" in t.lower())
+        self.assertIn("nome", achado.lower())
+        self.assertIn("sugere", achado.lower())
+
+    def test_texto_continua_apontando_que_verde_nao_foi_confirmado(self):
+        """Guard contra sobrecorrecao: o hedge nao pode apagar o ponto que
+        importa — o pipeline foi tratado como verde sem o teste confirmar."""
+        itens = render.findings(self._snap_com_deploy_ok())
+        achado = next(t for _, t in itens if "cancelado" in t.lower() and "deploy" in t.lower())
+        self.assertIn("verde", achado.lower())
+
+    def test_severidade_continua_alta_apos_o_hedge(self):
+        """Reavaliacao de severidade: decidido manter 'alto' mesmo com o
+        hedge (justificativa no comentario do render.py e no relatorio) —
+        este teste trava a decisao, nao so o texto."""
+        itens = render.findings(self._snap_com_deploy_ok())
+        nivel, _ = next((n, t) for n, t in itens if "cancelado" in t.lower() and "deploy" in t.lower())
+        self.assertEqual(nivel, "alto")
+
+
 if __name__ == "__main__":
     unittest.main()

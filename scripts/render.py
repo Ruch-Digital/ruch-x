@@ -854,10 +854,28 @@ def findings(snap):
     if isinstance(cancelados, int) and cancelados > 0:
         deploy_ok = _seguro(dig(snap, "ci", "cancelados_com_deploy_ok"), list) or []
         if deploy_ok:
-            out.append(("alto", f"{len(deploy_ok)} run(s) de CI cancelado(s) tinham um job de "
-                                f"deploy CONCLUÍDO COM SUCESSO no mesmo run — o pipeline foi "
-                                f"tratado como \"verde\", mas o job que testava foi cancelado "
-                                f"antes de confirmar nada."))
+            # `conclusion == "success"` e medido; "e um job de DEPLOY" e
+            # inferido do NOME (`_job_parece_deploy` no coletor, que ja
+            # filtra job de gate/check/lint/test — achado real no ion: um
+            # job "Checks rapidos (gate de deploy)" batia com "deploy" no
+            # nome sem ter executado deploy nenhum). O texto nao pode
+            # afirmar "um job de deploy concluiu" como fato apurado — so o
+            # que foi medido: sucesso + nome que sugere deploy.
+            #
+            # Severidade reavaliada e mantida ALTA mesmo com o hedge: o
+            # filtro de portao ja fecha a classe de falso positivo que a
+            # revisao achou, e o que sobra — job com nome limpo de deploy,
+            # concluido com sucesso, no MESMO run de um teste cancelado — e
+            # estruturalmente o incidente real que motivou este ajuste
+            # (deploy subiu, teste nunca confirmou nada). Rebaixar pra medio
+            # esconderia justamente o caso que esta frente existe pra expor;
+            # o residual de falso positivo (nome que nao e portao nem deploy
+            # de verdade) e raro e so gera uma sugestao de conferencia.
+            out.append(("alto", f"{len(deploy_ok)} run(s) de CI cancelado(s) tinham, no mesmo "
+                                f"run, um job cujo NOME sugere deploy com conclusão "
+                                f"\"success\" — o pipeline foi tratado como \"verde\" sem o "
+                                f"job de teste confirmar nada. Vale conferir se aquele job "
+                                f"realmente implantou algo."))
         else:
             out.append(("medio", f"{cancelados} run(s) de CI cancelado(s) na janela medida. "
                                  f"Cancelamento não é falha, mas também não confirma que o "

@@ -160,15 +160,15 @@ accumulates over time.
 python3 -m unittest discover -s scripts/tests -t scripts/tests
 ```
 
-168 tests, standard library only, no project dependencies:
+179 tests, standard library only, no project dependencies:
 
 | File | Tests | What it protects |
 |---|---|---|
 | `test_caminhos.py` | 6 | path containment |
 | `test_docs.py` | 5 | the documentation matching the code |
-| `test_nao_medido.py` | 46 | the `None`/`nao_medido` contract |
+| `test_nao_medido.py` | 53 | the `None`/`nao_medido` contract |
 | `test_redacao.py` | 37 | redaction of the snapshot |
-| `test_render_hostil.py` | 74 | the render against forged or malformed snapshots |
+| `test_render_hostil.py` | 78 | the render against forged or malformed snapshots |
 
 `scripts/tests/_fake_repo.py` builds a throwaway repository on a temp directory
 — no test touches a real project. The numbers in that table are asserted by
