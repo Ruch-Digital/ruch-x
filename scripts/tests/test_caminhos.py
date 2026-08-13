@@ -52,16 +52,17 @@ class TestCaminhoContido(unittest.TestCase):
 
 class TestFlagPFechaSysPath(unittest.TestCase):
     """`python -m X` poe o cwd (raiz do repo auditado) na frente do sys.path -
-    um `radon.py`/`pip.py` na raiz do projeto medido rodaria como __main__ na
-    maquina de quem audita (provado). `-P` fecha essa porta. O `manage.py`
-    fica de fora porque precisa importar o proprio projeto auditado.
+    um `radon.py`/`pip.py`/`pytest.py` na raiz do projeto medido rodaria como
+    __main__ na maquina de quem audita (provado). `-P` fecha essa porta. O
+    `manage.py` fica de fora porque precisa importar o proprio projeto
+    auditado.
 
-    Guard permanente da decisao: nao depende de radon/pip estarem
+    Guard permanente da decisao: nao depende de radon/pip/pytest estarem
     instalados porque `collect.run` e mockado — o teste so confere o
     COMANDO que seria executado.
     """
 
-    def test_dash_P_antes_do_m_em_radon_e_pip_mas_nao_no_manage(self):
+    def test_dash_P_antes_do_m_em_radon_pip_pytest_mas_nao_no_manage(self):
         comandos = []
 
         def fake_run(cmd, *args, **kwargs):
@@ -85,15 +86,21 @@ class TestFlagPFechaSysPath(unittest.TestCase):
                 collect.hotspots(root, {})
                 collect._deps_desatualizadas(root, {})
                 collect.collect_django(root, {"python": sys.executable})
+                collect.collect_tests(root, {"run_tests": True})
 
         chamadas_m = [c for c in comandos if "-m" in c]
         self.assertTrue(chamadas_m, "nenhuma chamada -m foi capturada")
+        modulos_vistos = set()
         for cmd in chamadas_m:
             idx = cmd.index("-m")
             modulo = cmd[idx + 1]
-            if modulo in ("radon", "pip"):
+            if modulo in ("radon", "pip", "pytest"):
+                modulos_vistos.add(modulo)
                 self.assertIn("-P", cmd[:idx],
                               f"falta -P antes de -m {modulo}: {cmd}")
+        # Sem isto, remover a chamada de collect_tests() acima faria o
+        # teste continuar OK mesmo que o guard do pytest tivesse sumido.
+        self.assertEqual(modulos_vistos, {"radon", "pip", "pytest"})
 
         chamadas_manage = [c for c in comandos
                             if any(str(p).endswith("manage.py") for p in c)]

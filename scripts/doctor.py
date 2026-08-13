@@ -38,7 +38,11 @@ def tem(b):
 
 def tem_modulo(nome):
     try:
-        subprocess.run([sys.executable, "-c", f"import {nome}"],
+        # -P: sem o diretorio atual no sys.path. Sem isso, um arquivo
+        # `<nome>.py` na raiz de quem roda o doctor sombrearia o modulo
+        # instalado (mesma classe de risco do -m em collect.py). Modulo
+        # de verdade continua importando — instalado nao depende do cwd.
+        subprocess.run([sys.executable, "-P", "-c", f"import {nome}"],
                        capture_output=True, timeout=20, check=True)
         return True
     except Exception:  # noqa: BLE001

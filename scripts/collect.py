@@ -624,7 +624,12 @@ def collect_tests(root, cfg):
 
     if not cov_path.exists() and run_tests:
         args = cfg.get("pytest_args", ["-q", "--cov", "--cov-report=json", "--durations=10"])
-        rc, so, se = run([sys.executable, "-m", "pytest", *args], cwd=root,
+        # -P: sem o diretorio do repositorio auditado no sys.path. Sem isso,
+        # um arquivo `pytest.py` na raiz do projeto medido roda como
+        # __main__ na maquina de quem audita (provado). Modulo instalado do
+        # proprio projeto continua importando: o pytest insere o rootdir no
+        # sys.path pelo mecanismo dele, nao pelo cwd do interpretador.
+        rc, so, se = run([sys.executable, "-P", "-m", "pytest", *args], cwd=root,
                          timeout=cfg.get("test_timeout", 900))
         out["source"] = "pytest"
         m = re.search(r"(\d+) passed", so)
