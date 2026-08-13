@@ -294,10 +294,15 @@ def collect_code(root, cfg):
     return out
 
 
+# `.ruch-x` entra aqui pelo mesmo motivo que `.metricas` (o nome legado) ja
+# estava: e a saida da propria ferramenta. Sem isso o `dashboard.html` gerado
+# aqui e contado como codigo-fonte do projeto — no proprio ruch-x, um unico
+# HTML derivado fazia a deteccao de stack devolver `['HTML']` pra uma
+# ferramenta escrita em Python (medido em 2026-08-13).
 IGNORE_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache",
                ".pytest_cache", ".ruff_cache", "migrations", "staticfiles", "static",
-               "dist", "build", ".metricas", "htmlcov", ".tox", "vendor", "target",
-               ".next", ".nuxt", "coverage", "Pods", ".gradle", "bin", "obj"}
+               "dist", "build", ".ruch-x", ".metricas", "htmlcov", ".tox", "vendor",
+               "target", ".next", ".nuxt", "coverage", "Pods", ".gradle", "bin", "obj"}
 
 # Extensoes tratadas como codigo-fonte em qualquer linguagem. Usadas pelo mapa
 # de atrito e pelo contador proprio quando scc/cloc nao existem.
@@ -422,43 +427,60 @@ def loc_by_module(root, cfg):
 def collect_quality(root, cfg):
     out = {"ruff": None, "complexity": None}
 
+    # Motivo do lint nao ter saido. Fica pendurado aqui e so vira `nao_medido`
+    # no fim, se nenhum dos dois caminhos (ruff, eslint) tiver medido: o
+    # ARQUIVO INTEIRO segue a regra "None e nao-medido, com motivo" e estes
+    # dois pontos eram a unica excecao — comando presente que falha, ou que
+    # devolve saida ilegivel, deixava `ruff: null` mudo, indistinguivel de
+    # "nao ha linter neste projeto".
+    motivo_lint = "nenhum linter disponível (ruff ausente e sem eslint no projeto)"
+
     if has("ruff"):
-        rc, so, _ = run(["ruff", "check", "--output-format", "json", "."], cwd=root)
-        if so.strip():
-            try:
-                items = json.loads(so)
-                by_rule = Counter(i.get("code") or "?" for i in items)
-                by_file = Counter(i.get("filename", "?") for i in items)
-                out["ruff"] = {
-                    "total": len(items),
-                    "by_rule": [{"rule": k, "count": v} for k, v in by_rule.most_common(12)],
-                    "worst_files": [{"file": rel(k, root), "count": v}
-                                    for k, v in by_file.most_common(10)],
-                }
-            except json.JSONDecodeError:
-                pass
+        # `ruff check` sai 1 quando ACHA violacao — o returncode nao diz se
+        # mediu. O sinal e a saida ser JSON: `[]` e "medi, esta limpo".
+        rc, so, se = run(["ruff", "check", "--output-format", "json", "."], cwd=root)
+        try:
+            items = json.loads(so) if so.strip() else None
+        except json.JSONDecodeError:
+            items = None
+        if isinstance(items, list):
+            by_rule = Counter(i.get("code") or "?" for i in items if isinstance(i, dict))
+            by_file = Counter(i.get("filename", "?") for i in items if isinstance(i, dict))
+            out["ruff"] = {
+                "total": len(items),
+                "by_rule": [{"rule": k, "count": v} for k, v in by_rule.most_common(12)],
+                "worst_files": [{"file": rel(k, root), "count": v}
+                                for k, v in by_file.most_common(10)],
+            }
+        else:
+            motivo_lint = f"ruff: {_motivo(rc, se) if rc else 'saída ilegível'}"
 
     if out["ruff"] is None and has("npx") and (Path(root) / "package.json").exists():
         # eslint so eh chamado se ja estiver configurado no projeto; --no-install
         # evita baixar pacote na maquina de quem esta so medindo.
-        rc, so, _ = run(["npx", "--no-install", "eslint", ".", "-f", "json"],
-                        cwd=root, timeout=300)
-        if so.strip().startswith("["):
-            try:
-                arquivos = json.loads(so)
-                itens = [(m.get("ruleId") or "?", a.get("filePath", "?"))
-                         for a in arquivos for m in a.get("messages", [])]
-                if itens:
-                    by_rule = Counter(r for r, _ in itens)
-                    by_file = Counter(f for _, f in itens)
-                    out["ruff"] = {
-                        "tool": "eslint", "total": len(itens),
-                        "by_rule": [{"rule": k, "count": v} for k, v in by_rule.most_common(12)],
-                        "worst_files": [{"file": rel(k, root), "count": v}
-                                        for k, v in by_file.most_common(10)],
-                    }
-            except json.JSONDecodeError:
-                pass
+        rc, so, se = run(["npx", "--no-install", "eslint", ".", "-f", "json"],
+                         cwd=root, timeout=300)
+        try:
+            arquivos = json.loads(so) if so.strip().startswith("[") else None
+        except json.JSONDecodeError:
+            arquivos = None
+        if isinstance(arquivos, list):
+            itens = [(m.get("ruleId") or "?", a.get("filePath", "?"))
+                     for a in arquivos if isinstance(a, dict)
+                     for m in (a.get("messages") or []) if isinstance(m, dict)]
+            by_rule = Counter(r for r, _ in itens)
+            by_file = Counter(f for _, f in itens)
+            out["ruff"] = {
+                "tool": "eslint", "total": len(itens),
+                "by_rule": [{"rule": k, "count": v} for k, v in by_rule.most_common(12)],
+                "worst_files": [{"file": rel(k, root), "count": v}
+                                for k, v in by_file.most_common(10)],
+            }
+        else:
+            motivo_lint = f"eslint: {_motivo(rc, se) if rc else 'saída ilegível'}"
+
+    if out["ruff"] is None:
+        nao_medido(out, "ruff", motivo_lint)
 
     # radon: complexidade ciclomatica por funcao (do PROJETO, nao das libs —
     # ver radon_ignore()).
@@ -471,11 +493,18 @@ def collect_quality(root, cfg):
     if rc == 0 and so.strip():
         try:
             data = json.loads(so)
+            # JSON valido com a FORMA errada (lista, string, numero) nao pode
+            # estourar `.items()` e matar o coletor inteiro: cai no mesmo
+            # `nao_medido` de qualquer outra saida ilegivel.
+            if not isinstance(data, dict):
+                raise json.JSONDecodeError("saida do radon nao e um objeto", so, 0)
             blocks = []
             for fname, items in data.items():
                 if not isinstance(items, list):
                     continue
                 for b in items:
+                    if not isinstance(b, dict):
+                        continue
                     blocks.append({
                         "file": rel(fname, root),
                         "name": b.get("name"),
@@ -646,6 +675,16 @@ def collect_tests(root, cfg):
         m = re.search(r"(\d+) passed", so)
         if m:
             out["test_count"] = int(m.group(1))
+        else:
+            # Suite que nem chegou a rodar (erro de coleta, import quebrado,
+            # timeout) deixava `test_count`/`duration_s` em None sem motivo —
+            # o painel mostrava o campo vazio como se ninguem tivesse pedido
+            # medicao. O returncode sozinho nao serve de sinal (pytest sai 1
+            # com teste FALHANDO, e ai o "N passed" existe): o sinal e o
+            # resumo da suite estar na saida.
+            motivo = _motivo(rc, se)
+            nao_medido(out, "test_count", motivo)
+            nao_medido(out, "duration_s", motivo)
         m = re.search(r"in ([\d.]+)s", so)
         if m:
             out["duration_s"] = float(m.group(1))
@@ -779,11 +818,15 @@ def collect_django(root, cfg):
         # coisa pra quem le o painel: projeto sem Django e o esperado;
         # `manage_py` do toml que nao resolve dentro da raiz e configuracao
         # quebrada, e ficaria invisivel se os dois dessem o mesmo texto.
-        nao_medido(
-            out, "pending_migrations",
-            f"manage_py configurado ({configurado}) não resolve dentro do repositório"
-            if configurado else "projeto sem manage.py na raiz",
-        )
+        # `deploy_issues`/`other_issues` saiam daqui como `[]` pelo mesmo
+        # motivo — e o rotulo do painel entao culpava o motivo ERRADO:
+        # repositorio que nem Django e exibia "avisos de segurança do
+        # framework (não auditado: settings de dev)", que e o texto do caso em
+        # que o check RODOU contra um settings de desenvolvimento.
+        motivo = (f"manage_py configurado ({configurado}) não resolve dentro do repositório"
+                  if configurado else "projeto sem manage.py na raiz")
+        for campo in ("pending_migrations", "deploy_issues", "other_issues"):
+            nao_medido(out, campo, motivo)
         return out
 
     # `python` do toml so vale se apontar pra dentro do repositorio (venv do
@@ -883,8 +926,13 @@ def collect_git(root, cfg):
         return out
     out["branch"] = so.strip()
 
-    _, so, _ = run(["git", "rev-parse", "--short", "HEAD"], cwd=root)
-    out["commit"] = so.strip()
+    # `commit: ""` era um campo vazio sem motivo: repositorio recem-criado
+    # (sem HEAD) ou objeto corrompido saiam iguais a "nao perguntei".
+    rc, so, se = run(["git", "rev-parse", "--short", "HEAD"], cwd=root)
+    if rc != 0:
+        nao_medido(out, "commit", _motivo(rc, se))
+    else:
+        out["commit"] = so.strip()
 
     for window, key in (("30 days ago", "commits_30d"), ("90 days ago", "commits_90d")):
         rc, so, se = run(["git", "rev-list", "--count", f"--since={window}", "HEAD"], cwd=root)
@@ -1439,6 +1487,31 @@ def _branch_protection(root):
     return out
 
 
+def _total_deps_npm(root):
+    """(total, motivo): dependencias diretas declaradas no package.json.
+
+    `npm outdated` conta o numerador e nao devolve denominador nenhum. Sem o
+    total, `desatualizadas` nao vira percentual e o criterio inteiro e
+    DESCARTADO — 37 dependencias velhas medidas davam a mesma nota de
+    Seguranca que um projeto em dia (medido em 2026-08-13). O denominador
+    honesto e o mesmo universo que o `npm outdated` varre por padrao: as
+    dependencias diretas do manifesto.
+    """
+    pkg = Path(root) / "package.json"
+    try:
+        dados = json.loads(pkg.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return None, f"package.json ilegível ({type(exc).__name__})"
+    if not isinstance(dados, dict):
+        return None, "package.json não é um objeto JSON"
+    total = 0
+    for chave in ("dependencies", "devDependencies", "optionalDependencies"):
+        bloco = dados.get(chave)
+        if isinstance(bloco, dict):
+            total += len(bloco)
+    return total, None
+
+
 def _deps_desatualizadas(root, cfg):
     """Quantas dependencias estao para tras. Dependencia velha e divida que
     rende juros: quanto mais tempo passa, mais caro fica o upgrade."""
@@ -1450,28 +1523,52 @@ def _deps_desatualizadas(root, cfg):
         if rc == 0 and so.strip():
             try:
                 itens = json.loads(so)
-                rc2, so2, _ = run([py, "-P", "-m", "pip", "list", "--format", "json"],
-                                  cwd=root, timeout=120)
+                rc2, so2, se2 = run([py, "-P", "-m", "pip", "list", "--format", "json"],
+                                    cwd=root, timeout=120)
                 total = len(json.loads(so2)) if rc2 == 0 and so2.strip() else None
                 out.update({
                     "ferramenta": "pip", "total": total, "desatualizadas": len(itens),
                     "exemplos": [{"nome": i.get("name"), "atual": i.get("version"),
                                   "ultima": i.get("latest_version")} for i in itens[:8]],
                 })
+                if total is None:
+                    # Numerador sem denominador: o criterio nao pode ser
+                    # avaliado, e tem que DIZER isso em vez de sumir.
+                    nao_medido(out, "total", _motivo(rc2, se2))
                 return out
             except json.JSONDecodeError:
                 pass
     if (Path(root) / "package.json").exists() and has("npm"):
-        rc, so, _ = run(["npm", "outdated", "--json"], cwd=root, timeout=180)
-        if so.strip():
-            try:
-                itens = json.loads(so)
-                out.update({"ferramenta": "npm", "desatualizadas": len(itens),
-                            "exemplos": [{"nome": k, "atual": v.get("current"),
-                                          "ultima": v.get("latest")}
-                                         for k, v in list(itens.items())[:8]]})
-            except json.JSONDecodeError:
-                pass
+        # O returncode NAO serve de sinal: `npm outdated` sai 1 justamente
+        # quando ACHOU dependencia velha (medicao bem-sucedida). O sinal e a
+        # saida ser um objeto JSON — `{}` e "medi e esta tudo em dia".
+        rc, so, se = run(["npm", "outdated", "--json"], cwd=root, timeout=180)
+        try:
+            itens = json.loads(so) if so.strip() else None
+        except json.JSONDecodeError:
+            itens = None
+        if not isinstance(itens, dict):
+            nao_medido(out, "desatualizadas",
+                       _motivo(rc, se) if rc else "npm outdated devolveu saída ilegível")
+            return out
+        out.update({"ferramenta": "npm", "desatualizadas": len(itens),
+                    "exemplos": [{"nome": k, "atual": v.get("current"),
+                                  "ultima": v.get("latest")}
+                                 for k, v in list(itens.items())[:8]
+                                 if isinstance(v, dict)]})
+        total, motivo = _total_deps_npm(root)
+        if total is None:
+            nao_medido(out, "total", motivo)
+        else:
+            out["total"] = total
+        return out
+    if out["desatualizadas"] is None and "nao_medido" not in out:
+        # Nenhum manifesto reconhecido (ou a ferramenta do stack ausente).
+        # Sem marcar, o criterio aparecia como um "(—/—)" pelado, sem o
+        # leitor descobrir se ninguem olhou ou se nao havia o que olhar.
+        nao_medido(out, "desatualizadas",
+                   "nenhum manifesto de dependências reconhecido (requirements.txt, "
+                   "pyproject.toml ou package.json com npm)")
     return out
 
 
@@ -1642,6 +1739,23 @@ REGISTRY = {
 }
 
 
+def _nomes_de_coletor(bruto, flag):
+    """Nomes de coletor de uma lista separada por virgula, avisando os que nao
+    existem.
+
+    Nome fora do REGISTRY era descartado em silencio nas duas flags. Em
+    `--skip` isso falha seguro (o coletor roda), em `--only` nao: filtra tudo
+    e produz um snapshot vazio com exit 0.
+    """
+    nomes = [c.strip() for c in bruto.split(",") if c.strip()]
+    desconhecidos = [c for c in nomes if c not in REGISTRY]
+    if desconhecidos:
+        print(f"aviso: {flag} recebeu coletor(es) desconhecido(s): "
+              f"{', '.join(desconhecidos)} — validos: {', '.join(sorted(REGISTRY))}",
+              file=sys.stderr)
+    return nomes
+
+
 def gravar_snapshot(snapshot, path, outdir):
     """Redige e grava o snapshot em `path` e em `outdir/latest.json`.
 
@@ -1673,9 +1787,16 @@ def main():
 
     selected = COLLECTORS
     if args.only:
-        selected = [c.strip() for c in args.only.split(",") if c.strip() in REGISTRY]
+        pedidos = _nomes_de_coletor(args.only, "--only")
+        selected = [c for c in pedidos if c in REGISTRY]
+        if not selected:
+            # Um `--only gouvernance` (typo) filtrava tudo em silencio e saia
+            # com exit 0: snapshot sem coletor nenhum, `errors: {}`, e o
+            # dashboard desse snapshot dizendo "Nenhum alerta nos limiares
+            # configurados" — laudo limpo de uma coleta que nao aconteceu.
+            raise SystemExit("--only nao selecionou nenhum coletor valido — nada foi coletado")
     if args.skip:
-        skip = {c.strip() for c in args.skip.split(",")}
+        skip = set(_nomes_de_coletor(args.skip, "--skip"))
         selected = [c for c in selected if c not in skip]
 
     snapshot = {

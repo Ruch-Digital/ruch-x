@@ -31,8 +31,14 @@ auditado*, shows the reason, and removes it from the grade's denominator.
 
 Do not use the return code alone to decide whether a command measured anything.
 `manage.py check --deploy` exits 1 both when it found problems and when it
-crashed. The collector checks that the output has the *shape* of a check report
-instead.
+crashed; `ruff check` and `npm outdated` exit 1 precisely when the measurement
+succeeded and found something. The signal is that the output has the expected
+*shape* — JSON that parses, a check summary — never the return code.
+
+The same applies to what the panel prints: a value that was not measured is
+never interpolated raw into a label or a summary — it becomes a dash
+(`_valor()` in `render.py`). An axis summary line never asserts a number nobody
+measured.
 
 ### 2. Never write a secret into the snapshot
 
@@ -72,7 +78,9 @@ in the audited repository's root cannot shadow the real one.
 ### 5. Register it
 
 Add the function to `REGISTRY` and its name to `COLLECTORS`, so `--only` and
-`--skip` can address it.
+`--skip` can address it. `render.COLETORES_ESPERADOS` mirrors that list — it is
+what lets the panel say "this collector was never attempted" — and a suite guard
+keeps the two from drifting apart.
 
 ### Example
 
@@ -116,7 +124,9 @@ older version of the tool, or by hand. The render never assumes a field's type:
   escape the value when it is not actually a number;
 - `_seguro(v, tipos, default)` coerces a wrong-typed field before any
   arithmetic, indexing or `.get()`;
-- `dig(obj, *keys)` walks nested dicts without raising on a missing level.
+- `dig(obj, *keys)` walks nested dicts without raising on a missing level;
+- `_valor(v, suffix)` is what keeps an unmeasured value from reaching the screen
+  as the string `None`.
 
 Interpolating a raw `{field}` into markup — even one you are sure is an integer
 — is the bug class these helpers exist to prevent.
@@ -150,11 +160,19 @@ accumulates over time.
 python3 -m unittest discover -s scripts/tests -t scripts/tests
 ```
 
-82 tests, standard library only, no project dependencies. They cover the four
-things that are easy to break by accident: path containment (6), the
-`None`/`nao_medido` contract (18), redaction (28), and the render against
-forged or malformed snapshots (30). `scripts/tests/_fake_repo.py` builds a
-throwaway repository on a temp directory — no test touches a real project.
+136 tests, standard library only, no project dependencies:
+
+| File | Tests | What it protects |
+|---|---|---|
+| `test_caminhos.py` | 6 | path containment |
+| `test_docs.py` | 5 | the documentation matching the code |
+| `test_nao_medido.py` | 38 | the `None`/`nao_medido` contract |
+| `test_redacao.py` | 37 | redaction of the snapshot |
+| `test_render_hostil.py` | 50 | the render against forged or malformed snapshots |
+
+`scripts/tests/_fake_repo.py` builds a throwaway repository on a temp directory
+— no test touches a real project. The numbers in that table are asserted by
+`test_docs.py` against the real suite, so they cannot silently go stale.
 
 Add a test with the change, in the file that matches its class. A new redaction
 pattern without a test asserting the secret is gone is a pattern nobody can

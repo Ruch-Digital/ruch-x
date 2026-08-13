@@ -8,6 +8,8 @@ nenhum relatorio.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import shutil
 import subprocess
@@ -340,6 +342,265 @@ class TestContagemCodigo(unittest.TestCase):
         self.assertIn("total_loc", out.get("nao_medido", {}))
         self.assertIsNone(out["total_files"])
         self.assertIn("total_files", out.get("nao_medido", {}))
+
+
+# ----------------------------------------------------------------------
+# Fix wave final: achados da revisao de branch inteira. Aqui ficam os que
+# moram no coletor.
+# ----------------------------------------------------------------------
+
+class TestCritical2TotalDeDependenciasNode(unittest.TestCase):
+    """O ramo npm gravava `desatualizadas` e nunca `total`.
+
+    Sem denominador, `pct_velhas` era sempre None em `render.py` e o criterio
+    inteiro saia do calculo: um projeto Node com 37 dependencias velhas
+    tirava a MESMA nota de Seguranca de um com tudo em dia. Falta de medicao
+    PREMIANDO — o contrato da ferramenta invertido. O ramo pip ja fazia a
+    segunda chamada; o npm parou no meio.
+    """
+
+    PACKAGE_JSON = json.dumps({
+        "name": "alvo",
+        "dependencies": {f"dep{i}": "^1.0.0" for i in range(30)},
+        "devDependencies": {f"dev{i}": "^1.0.0" for i in range(10)},
+    })
+
+    @staticmethod
+    def _npm_outdated(quantas):
+        return json.dumps({f"dep{i}": {"current": "1.0.0", "wanted": "2.0.0",
+                                       "latest": "2.0.0"} for i in range(quantas)})
+
+    def _medir(self, quantas_velhas):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"package.json": self.PACKAGE_JSON})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run",
+                                    return_value=(1, self._npm_outdated(quantas_velhas), "")):
+                return collect._deps_desatualizadas(root, {})
+
+    def test_npm_grava_o_total_de_dependencias_diretas(self):
+        deps = self._medir(37)
+        self.assertEqual(deps["ferramenta"], "npm")
+        self.assertEqual(deps["desatualizadas"], 37)
+        self.assertEqual(deps["total"], 40, "30 dependencies + 10 devDependencies")
+
+    def test_projeto_em_dia_tambem_tem_denominador(self):
+        """Mutacao inversa: `{}` do npm e medicao valida (nada desatualizado),
+        e o total tem que vir junto — senao o criterio some justamente no
+        caso em que ele PASSARIA."""
+        deps = self._medir(0)
+        self.assertEqual(deps["desatualizadas"], 0)
+        self.assertEqual(deps["total"], 40)
+        self.assertNotIn("total", deps.get("nao_medido", {}))
+
+    def test_package_json_ilegivel_marca_total_nao_medido(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"package.json": "{ isto nao e json"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run",
+                                    return_value=(1, self._npm_outdated(3), "")):
+                deps = collect._deps_desatualizadas(root, {})
+        self.assertEqual(deps["desatualizadas"], 3)
+        self.assertIsNone(deps["total"])
+        self.assertIn("total", deps.get("nao_medido", {}))
+
+    def test_npm_que_falha_nao_vira_zero_dependencias_velhas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"package.json": self.PACKAGE_JSON})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run",
+                                    return_value=(127, "", "npm: comando nao encontrado")):
+                deps = collect._deps_desatualizadas(root, {})
+        self.assertIsNone(deps["desatualizadas"])
+        self.assertIn("desatualizadas", deps.get("nao_medido", {}))
+
+    def test_sem_manifesto_nenhum_o_criterio_diz_por_que(self):
+        """Repositorio sem requirements/pyproject/package.json: o painel
+        mostrava um "(—/—)" pelado, sem o leitor descobrir se ninguem olhou
+        ou se nao havia o que olhar."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"main.go": "package main\n"})
+            deps = collect._deps_desatualizadas(root, {})
+        self.assertIsNone(deps["desatualizadas"])
+        self.assertIn("manifesto", deps.get("nao_medido", {}).get("desatualizadas", ""))
+
+
+class TestImportant6MotivoOndeFaltava(unittest.TestCase):
+    """Os unicos pontos do arquivo que nao seguiam a regra que o arquivo
+    documenta: comando presente que falha ou devolve saida ilegivel deixava
+    o campo em `None` MUDO, sem entrada em `nao_medido`."""
+
+    def test_ruff_que_falha_deixa_motivo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "has", side_effect=lambda b: b == "ruff"), \
+                 mock.patch.object(collect, "run",
+                                    return_value=(2, "", "ruff: panic: unexpected")):
+                out = collect.collect_quality(root, {})
+        self.assertIsNone(out["ruff"])
+        self.assertIn("ruff", out.get("nao_medido", {}))
+        self.assertIn("panic", out["nao_medido"]["ruff"])
+
+    def test_ruff_com_zero_violacoes_continua_sendo_medicao(self):
+        """Mutacao inversa: `[]` e "medi e esta limpo", nao "nao medi"."""
+
+        def fake_run(cmd, *args, **kwargs):
+            # so o ruff responde JSON aqui; o radon do mesmo coletor cai no
+            # caminho de ausencia (o que este teste nao esta medindo).
+            if "ruff" in cmd:
+                return 0, "[]", ""
+            return 127, "", "comando nao encontrado"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "has", side_effect=lambda b: b == "ruff"), \
+                 mock.patch.object(collect, "run", side_effect=fake_run):
+                out = collect.collect_quality(root, {})
+        self.assertEqual(out["ruff"]["total"], 0)
+        self.assertNotIn("ruff", out.get("nao_medido", {}))
+
+    def test_radon_com_json_de_forma_errada_nao_derruba_o_coletor(self):
+        """JSON valido com a FORMA errada (lista onde se espera objeto)
+        estourava `.items()` e matava o coletor `quality` inteiro — o campo
+        virava um `errors[quality]`, e nao um `nao_medido` com motivo."""
+
+        def fake_run(cmd, *args, **kwargs):
+            if "radon" in cmd:
+                return 0, "[1, 2, 3]", ""
+            return 127, "", "comando nao encontrado"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "has", return_value=False), \
+                 mock.patch.object(collect, "run", side_effect=fake_run):
+                out = collect.collect_quality(root, {})
+        self.assertIsNone(out["complexity"])
+        self.assertIn("complexity", out.get("nao_medido", {}))
+
+    def test_sem_linter_nenhum_tambem_e_nao_medido(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "has", return_value=False):
+                out = collect.collect_quality(root, {})
+        self.assertIsNone(out["ruff"])
+        self.assertIn("ruff", out.get("nao_medido", {}))
+
+    def test_suite_que_nem_roda_deixa_motivo(self):
+        """`rc`/`se` do pytest eram descartados: suite que crasha na coleta
+        (import quebrado, timeout) nao deixava rastro nenhum."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(
+                    collect, "run",
+                    return_value=(2, "ERROR collecting", "ImportError: no module named x")):
+                out = collect.collect_tests(root, {"run_tests": True})
+        self.assertIsNone(out["test_count"])
+        self.assertIn("test_count", out.get("nao_medido", {}))
+        self.assertIn("ImportError", out["nao_medido"]["test_count"])
+
+    def test_suite_que_roda_com_teste_falhando_continua_contando(self):
+        """Guard contra sobrecorrecao: pytest sai 1 com teste FALHANDO, e ali
+        o "N passed" existe — o returncode nao pode virar o sinal."""
+        saida = "F...\n1 failed, 12 passed in 3.20s\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "run", return_value=(1, saida, "")):
+                out = collect.collect_tests(root, {"run_tests": True})
+        self.assertEqual(out["test_count"], 12)
+        self.assertNotIn("test_count", out.get("nao_medido", {}))
+
+    @unittest.skipUnless(shutil.which("git"), "git ausente")
+    def test_rev_parse_do_commit_que_falha_deixa_motivo(self):
+        """`commit: ""` era campo vazio sem motivo — igual a "nao perguntei"."""
+        original_run = collect.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if "rev-parse" in cmd and "--short" in cmd:
+                return 128, "", "fatal: ambiguous argument 'HEAD'"
+            return original_run(cmd, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = TestGit._repo_git_real(tmp, **{"app.py": "x = 1\n"})
+            with mock.patch.object(collect, "run", side_effect=fake_run):
+                out = collect.collect_git(root, {})
+        self.assertIsNone(out["commit"])
+        self.assertIn("commit", out.get("nao_medido", {}))
+        self.assertIsNotNone(out["branch"], "so a porta do commit foi afetada")
+
+
+class TestMinor6DjangoAusente(unittest.TestCase):
+    """`collect_django` saia cedo sem manage.py deixando `deploy_issues: []`
+    e `other_issues: []` sem marcar — e o rotulo do painel entao culpava o
+    motivo errado ("settings de dev") num repositorio que nem Django e."""
+
+    def test_repo_sem_manage_py_nao_afirma_zero_avisos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"main.go": "package main\n"})
+            out = collect.collect_django(root, {})
+        self.assertIsNone(out["deploy_issues"])
+        self.assertIsNone(out["other_issues"])
+        for campo in ("pending_migrations", "deploy_issues", "other_issues"):
+            self.assertIn("sem manage.py", out["nao_medido"][campo])
+
+
+class TestMinor2SaidaDaFerramentaIgnorada(unittest.TestCase):
+    """`.ruch-x` nao estava em IGNORE_DIRS (so o legado `.metricas`): o
+    `dashboard.html` que a propria ferramenta gera virava o stack detectado
+    — o snapshot commitado deste repositorio dizia `stack: ['HTML']` pra uma
+    ferramenta escrita em Python."""
+
+    def test_dashboard_gerado_nao_vira_o_stack_do_projeto(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{
+                "scripts/app.py": "x = 1\n",
+                ".ruch-x/dashboard.html": "<html><body>painel</body></html>\n",
+                ".ruch-x/2026-01-01.json": "{}\n",
+            })
+            out = collect.collect_stack(root, {})
+        self.assertEqual(out["detected"], ["Python"])
+        self.assertNotIn("HTML", out["detected"])
+
+    def test_html_de_verdade_do_projeto_continua_contando(self):
+        """Mutacao inversa: so a pasta da ferramenta e ignorada — template do
+        projeto continua sendo codigo-fonte."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"templates/index.html": "<h1>oi</h1>\n"})
+            out = collect.collect_stack(root, {})
+        self.assertEqual(out["detected"], ["HTML"])
+
+
+class TestImportant2OnlyComTypo(unittest.TestCase):
+    """`--only gouvernance,cod` filtrava os nomes invalidos em silencio e
+    saia com exit 0: `collectors_run: []`, `errors: {}` — e o dashboard desse
+    snapshot dizia "ok — Nenhum alerta nos limiares configurados"."""
+
+    def test_only_sem_nenhum_nome_valido_falha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = ["collect.py", "--root", tmp, "--only", "gouvernance,cod"]
+            with mock.patch.object(sys, "argv", argv), \
+                 contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit):
+                    collect.main()
+        self.assertIn("gouvernance", err.getvalue())
+        self.assertIn("cod", err.getvalue())
+
+    def test_nome_desconhecido_avisa_mesmo_com_um_valido(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = ["collect.py", "--root", tmp, "--only", "gouvernance,stack"]
+            with mock.patch.object(sys, "argv", argv), \
+                 contextlib.redirect_stderr(io.StringIO()) as err, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                collect.main()  # nao pode falhar: "stack" e valido
+        self.assertIn("gouvernance", err.getvalue())
+
+    def test_skip_com_typo_tambem_avisa(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = ["collect.py", "--root", tmp, "--only", "stack", "--skip", "gitt"]
+            with mock.patch.object(sys, "argv", argv), \
+                 contextlib.redirect_stderr(io.StringIO()) as err, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                collect.main()
+        self.assertIn("gitt", err.getvalue())
 
 
 if __name__ == "__main__":

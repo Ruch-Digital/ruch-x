@@ -23,6 +23,14 @@ from pathlib import Path
 SNAPSHOT_DIR = ".ruch-x"
 SNAPSHOT_DIR_LEGADO = ".metricas"
 
+# Espelho de `collect.COLLECTORS`. O render nao importa o coletor de proposito
+# — os dois rodam sozinhos e o snapshot pode ter vindo de outra maquina, ou de
+# uma versao diferente da ferramenta. A duplicacao existe pra que a tela
+# consiga dizer "este coletor nem foi tentado"; um guard na suite trava as
+# duas listas contra divergencia.
+COLETORES_ESPERADOS = ("stack", "code", "quality", "tests", "django", "git",
+                       "db", "infra", "ci", "governance", "dora")
+
 
 # --------------------------------------------------------------------------
 # helpers
@@ -309,15 +317,68 @@ def pluralize_label(snap):
             "Pasta": "Pastas"}.get(base, base + "s")
 
 
-def _nao_medido(snap, coletor, campo):
+def _nao_medido(snap, *caminho):
     """Sufixo do rotulo quando o criterio nao pode ser medido.
 
     Criterio nao auditado ja sai do denominador da nota (`eixo()` so soma os
     itens com ok is not None). O que faltava era a tela DIZER isso — sem o
     motivo, o leitor supoe que passou.
+
+    `caminho` e (coletor, [subchave...], campo): o mapa `nao_medido` fica ao
+    lado do campo que ele explica, e nem todo campo mora na raiz do coletor
+    (`governance.dependencias.total`, por exemplo, tem o proprio mapa dentro
+    do sub-dict). O ultimo elemento e sempre o nome do campo.
     """
-    motivo = dig(snap, coletor, "nao_medido", campo)
+    *pais, campo = caminho
+    motivo = dig(snap, *pais, "nao_medido", campo)
     return f" (não auditado: {motivo})" if motivo else ""
+
+
+def _valor(v, sufixo=""):
+    """Texto de um valor que pode nao ter sido medido.
+
+    Interpolar `{v}` cru num f-string de rotulo escreve a string "None" na
+    tela quando o coletor nao rodou — o painel afirmando, em portugues de
+    Python, um numero que ninguem apurou (dez vezes no dashboard do proprio
+    ruch-x, 2026-08-13). Nao-numero — inclusive `None` — vira travessao.
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return "—"
+    return f"{v}{sufixo}"
+
+
+def _coletor_ausente(snap, coletor):
+    """Motivo de um coletor inteiro nao ter produzido dado, ou "" se produziu.
+
+    Coletor que levanta excecao nao deixa a propria chave no snapshot — so
+    uma entrada em `errors`. Sem olhar ali, o criterio sai como "não
+    auditado" pelado, e quem le nao descobre por que.
+    """
+    if isinstance(snap.get(coletor), dict):
+        return ""
+    erro = _seguro(snap.get("errors"), dict, {}).get(coletor)
+    if erro:
+        return str(erro)
+    return f"coletor {coletor} não rodou"
+
+
+def _nao_auditado(snap, coletor, *campo):
+    """`_nao_medido` com fallback pro motivo do coletor inteiro.
+
+    Ordem: o motivo especifico do campo (o coletor rodou e uma medicao
+    falhou) ganha do motivo generico do coletor (nem rodou). Sem `campo`,
+    so o generico — pro criterio que depende do coletor inteiro.
+    """
+    especifico = _nao_medido(snap, coletor, *campo) if campo else ""
+    if especifico:
+        return especifico
+    generico = _coletor_ausente(snap, coletor)
+    return f" (não auditado: {generico})" if generico else ""
+
+
+def _sim_nao(ok, sim="sim", nao="não", na="não auditado"):
+    """Tres estados no resumo do eixo. `None` NAO e "não"."""
+    return na if ok is None else (sim if ok else nao)
 
 
 # --------------------------------------------------------------------------
@@ -333,6 +394,11 @@ def _nao_medido(snap, coletor, campo):
 # State of DevOps) pros numeros de entrega, OWASP e SLSA pra supply chain,
 # Google SRE pra confiabilidade. Os limiares estao explicitos pra poderem ser
 # discutidos com o cliente em vez de saírem de uma caixa-preta.
+
+# Complexidade acumulada acima da qual o arquivo mais mexido do projeto deixa
+# de ser "sob controle". E um numero ABSOLUTO — so pode ser aplicado a uma
+# medicao absoluta (radon). Ver o criterio do arquivo de maior atrito.
+LIMIAR_HOTSPOT = 150
 
 NIVEIS_DORA = {  # (elite, alto, medio) — abaixo disso e baixo
     "deploys_por_semana": (7, 1, 0.25),
@@ -377,7 +443,14 @@ def auditoria(snap):
             if ok is False:
                 achados.append((prio, nome, txt, acao))
         pct, letra = _nota(ganhos, total)
+        # A letra sozinha nao distingue um eixo auditado inteiro de um eixo
+        # apoiado num unico criterio: "F" com 1 de 4 medidos e "F" com 4 de 4
+        # sao visualmente identicos, e o primeiro e uma opiniao com 25% de
+        # base. A contagem vai pro card pra que a nota possa ser lida com o
+        # tamanho da amostra ao lado (nao muda o calculo — so o que a tela diz).
         eixos.append({"nome": nome, "pct": pct, "letra": letra, "resumo": resumo,
+                      "medidos": sum(1 for i in itens if i[1] is not None),
+                      "criterios": len(itens),
                       "checados": [(i[2], i[1]) for i in itens]})
 
     # ---------------- Entrega (DORA) ----------------
@@ -393,20 +466,32 @@ def auditoria(snap):
     n_freq, n_lead = _nivel_dora("deploys_por_semana", freq), _nivel_dora("lead_time_p50_h", lead)
     n_cfr, n_mttr = _nivel_dora("change_failure_rate", cfr), _nivel_dora("mttr_h", mttr)
     bom = {"elite", "alto"}
+    # Rotulo e resumo passam por `_valor`: sem medicao o numero vira travessao,
+    # nunca a string "None". O texto do achado pode interpolar cru — ele so e
+    # exibido quando `ok is False`, o que exige o valor existir.
     eixo("Entrega", [
-        (3, None if freq is None else n_freq in bom, f"frequência de deploy ({freq}/semana)", "P2",
+        (3, None if freq is None else n_freq in bom,
+         f"frequência de deploy ({_valor(freq, '/semana')})"
+         + (_nao_auditado(snap, "dora", "deploys_por_semana") if freq is None else ""), "P2",
          f"Deploy {freq}/semana — abaixo do patamar de time de alta performance (1+/semana).",
          "Encurtar o ciclo: integrar na main com mais frequência e automatizar o caminho até produção."),
-        (3, None if lead is None else n_lead in bom, f"lead time p50 ({lead}h)", "P1",
+        (3, None if lead is None else n_lead in bom,
+         f"lead time p50 ({_valor(lead, 'h')})"
+         + (_nao_auditado(snap, "dora", "lead_time_p50_h") if lead is None else ""), "P1",
          f"Lead time de {lead}h entre commit e produção.",
          "Reduzir fila e etapas manuais entre merge e deploy."),
-        (3, None if cfr is None else n_cfr in bom, f"taxa de falha ({cfr}%)", "P1",
+        (3, None if cfr is None else n_cfr in bom,
+         f"taxa de falha ({_valor(cfr, '%')})"
+         + (_nao_auditado(snap, "dora", "change_failure_rate") if cfr is None else ""), "P1",
          f"{cfr}% das mudanças que chegam na branch de produção falham no pipeline.",
          "Gatear o merge com a suíte e rodar o teste do módulo tocado antes do push."),
-        (2, None if mttr is None else n_mttr in bom, f"tempo de recuperação ({mttr}h)", "P1",
+        (2, None if mttr is None else n_mttr in bom,
+         f"tempo de recuperação ({_valor(mttr, 'h')})"
+         + (_nao_auditado(snap, "dora", "mttr_h") if mttr is None else ""), "P1",
          f"Leva {mttr}h em média pra recuperar de uma falha de deploy.",
          "Rollback documentado e imagem anterior sempre disponível encurtam isso pra minutos."),
-    ], f"{freq}/sem · lead {lead}h · falha {cfr}% · recuperação {mttr}h")
+    ], f"{_valor(freq, '/sem')} · lead {_valor(lead, 'h')} · "
+       f"falha {_valor(cfr, '%')} · recuperação {_valor(mttr, 'h')}")
 
     # ---------------- Qualidade ----------------
     cov = _seguro(dig(snap, "tests", "coverage_pct"), (int, float))
@@ -421,7 +506,28 @@ def auditoria(snap):
     hotspots_raw = _seguro(dig(snap, "git", "hotspots"), list) or []
     hot0 = next((h for h in hotspots_raw if isinstance(h, dict)), None)
     hot0_cx = _seguro(hot0.get("complexity"), (int, float), 0) if hot0 else 0
-    hot_ok = None if hot0 is None else hot0_cx < 150
+    hot0_metodo = hot0.get("metodo") if hot0 else None
+    # `LIMIAR_HOTSPOT` e absoluto, entao so pode julgar numero absoluto. Sem
+    # radon a complexidade do mapa vem de contagem de palavras de ramificacao,
+    # e o proprio coletor declara que ela serve "pro que o mapa precisa:
+    # ordenar arquivos entre si, nao produzir um numero absoluto". Medido
+    # nos arquivos deste repositorio, a heuristica fica 25%-33% ABAIXO do
+    # radon (collect.py 473 -> 354; render.py 337 -> 225): um arquivo que o
+    # radon poe em 180 (reprova) a heuristica poe em 120 (aprova) — o
+    # veredito passaria a depender de o auditor ter radon instalado, e nao do
+    # codigo auditado. Sem a procedencia do numero o criterio nao e avaliado:
+    # sai do denominador com o motivo na tela, que e a regra da casa.
+    # `metodo` ausente e snapshot anterior ao campo (Task 4): procedencia
+    # desconhecida vale o mesmo que heuristica — nao se julga o que nao se sabe.
+    hot_ok = hot0_cx < LIMIAR_HOTSPOT if hot0_metodo == "radon" else None
+    if hot0 is None:
+        hot_rotulo = _nao_auditado(snap, "git", "hotspots")
+    elif hot0_metodo == "radon":
+        hot_rotulo = ""
+    elif hot0_metodo == "heuristica":
+        hot_rotulo = " (não auditado: complexidade estimada sem radon)"
+    else:
+        hot_rotulo = " (não auditado: método de medição da complexidade não registrado)"
     eixo("Qualidade", [
         # Cobertura ausente e ACHADO, nao "nao se aplica": nao medir e uma
         # escolha com consequencia — ninguem sabe o que a suite protege.
@@ -432,14 +538,16 @@ def auditoria(snap):
          "Cobertura de testes não é medida — não há como saber o que a suíte protege."
          if cov is None else f"Cobertura em {cov}%.",
          "Rodar a suíte com relatório de cobertura e versionar o resultado a cada coleta."),
-        (3, None if pct_cx is None else pct_cx < 5, f"complexidade ({cx} funções acima de 10)", "P2",
+        (3, None if pct_cx is None else pct_cx < 5,
+         f"complexidade ({_valor(cx)} funções acima de 10)"
+         + (_nao_auditado(snap, "quality", "complexity") if pct_cx is None else ""), "P2",
          f"{cx} funções com complexidade acima de 10 ({pct_cx:.1f}% do total)." if pct_cx else "",
          "Quebrar as piores em funções menores — começar pelas que aparecem no mapa de atrito."),
-        (3, hot_ok, "arquivo de maior atrito sob controle", "P1",
+        (3, hot_ok, "arquivo de maior atrito sob controle" + hot_rotulo, "P1",
          f"O arquivo mais mexido do projeto ({hot0.get('file', '—') if hot0 else '—'}) acumula "
          f"complexidade {hot0_cx} em {hot0.get('loc', '—') if hot0 else '—'} linhas." if hot0 else "",
          "Dividir em partes menores: cada mudança nele hoje é lenta e arriscada."),
-    ], f"cobertura {cov if cov is not None else '—'} · {cx} funções complexas")
+    ], f"cobertura {_valor(cov, '%')} · {_valor(cx)} funções complexas")
 
     # ---------------- Segurança ----------------
     # `gov`/`wf` sanitizados via `_seguro`: se "governance" (ou seu campo
@@ -481,6 +589,12 @@ def auditoria(snap):
     total_deps = _seguro(deps.get("total"), (int, float))
     pct_velhas = (100 * desatual / total_deps) if (desatual is not None and total_deps) else None
     sec_django = _seguro(dig(snap, "django", "deploy_issues"), list)
+    # A linha de resumo do eixo e a unica coisa que muita gente le. Ela nao
+    # pode afirmar "0 segredo(s) · 0 action(s) sem pin" com o coletor
+    # `governance` inteiro caido — era o achado parqueado da Task 3
+    # reconstruido uma linha abaixo do criterio que a Task 7 consertou.
+    n_seg = len(seg) if seg is not None else None
+    n_pin = len(sem_pin) if wf_raw is not None else None
     eixo("Segurança", [
         (5, None if seg is None else len(seg) == 0,
          "nenhum segredo commitado"
@@ -494,7 +608,11 @@ def auditoria(snap):
         (2, None if wf_raw is None else len(sem_perm) == 0, "workflows com permissions declarado" + gov_rotulo, "P2",
          f"{len(sem_perm)} workflow(s) sem bloco `permissions` — herdam token amplo.",
          "Declarar `permissions:` com o mínimo necessário em cada workflow."),
-        (2, None if pct_velhas is None else pct_velhas < 25, f"dependências atualizadas ({desatual}/{total_deps})" + gov_rotulo, "P2",
+        (2, None if pct_velhas is None else pct_velhas < 25,
+         f"dependências atualizadas ({_valor(desatual)}/{_valor(total_deps)})"
+         + ((_nao_medido(snap, "governance", "dependencias", "total")
+             or _nao_medido(snap, "governance", "dependencias", "desatualizadas")
+             or gov_rotulo) if pct_velhas is None else ""), "P2",
          f"{desatual} de {total_deps} dependências desatualizadas ({pct_velhas:.0f}%)." if pct_velhas else "",
          "Dependência velha é dívida com juros: quanto mais espera, mais caro e arriscado o upgrade."),
         (2, gov.get("dependabot"), "atualização automática de dependências" + gov_rotulo, "P2",
@@ -512,7 +630,7 @@ def auditoria(snap):
          f"{len(sec_django or [])} aviso(s) de segurança no check de deploy "
          f"(settings: {dig(snap, 'django', 'settings_module') or 'do ambiente'}).",
          "Revisar HSTS, cookies seguros e redirect de SSL nos settings de produção."),
-    ], f"{len(seg or [])} segredo(s) · {len(sem_pin)} action(s) sem pin")
+    ], f"{_valor(n_seg)} segredo(s) · {_valor(n_pin)} action(s) sem pin")
 
     # ---------------- Confiabilidade ----------------
     tem_alerta = bool(dig(snap, "infra", "containers")) or bool(snap.get("db"))
@@ -520,27 +638,41 @@ def auditoria(snap):
     pend = _seguro(dig(snap, "django", "pending_migrations"), list)
     ci_ok = _seguro(dig(snap, "ci", "success_rate"), (int, float))
     eixo("Confiabilidade", [
-        (3, None if ci_ok is None else ci_ok >= 85, f"CI verde ({ci_ok}%)", "P1",
+        (3, None if ci_ok is None else ci_ok >= 85,
+         f"CI verde ({_valor(ci_ok, '%')})"
+         + (_nao_auditado(snap, "ci", "success_rate") if ci_ok is None else ""), "P1",
          f"Pipeline verde em apenas {ci_ok}% das execuções.",
          "Pipeline instável faz o time ignorar vermelho — estabilizar antes de adicionar teste novo."),
         (3, _do_gov(runbooks), "runbook de operação" + gov_rotulo, "P1",
          "Sem runbooks: quando algo quebrar às 3h, a resposta está na cabeça de alguém.",
          "Escrever o passo a passo dos incidentes que já aconteceram — um arquivo por alerta."),
         (2, None if pend is None else len(pend) == 0,
-         "migrations aplicadas" + _nao_medido(snap, "django", "pending_migrations"), "P2",
+         "migrations aplicadas"
+         + (_nao_auditado(snap, "django", "pending_migrations") if pend is None else ""), "P2",
          f"{len(pend or [])} migration(s) pendente(s) no ambiente medido.",
          "Aplicar ou confirmar que o alvo da medição é o ambiente certo."),
-        (2, tem_alerta or None, "infraestrutura observável", "P2",
+        (2, tem_alerta or None,
+         "infraestrutura observável"
+         + ("" if tem_alerta else (_nao_auditado(snap, "db") or _nao_auditado(snap, "infra"))), "P2",
          "Nenhuma métrica de runtime coletada (containers/banco).",
          "Expor métrica de container e banco — sem isso, incidente vira adivinhação."),
-    ], f"CI {ci_ok}% · runbooks {'sim' if runbooks else 'não'}")
+    ], f"CI {_valor(ci_ok, '%')} · runbooks {_sim_nao(_do_gov(runbooks))}")
 
     # ---------------- Processo ----------------
     bp = _seguro(gov.get("branch_protection"), dict, {})
     docs = _seguro(gov.get("docs"), dict, {})
     protegido = bp.get("protegido") if bp.get("disponivel") else None
+    # `docs/criteria.md` e explicito: reportar "desprotegida" por falha de
+    # requisicao "seria uma acusacao sem ter olhado". O criterio ja saia como
+    # None — faltava a LINHA DE RESUMO parar de afirmar, e o motivo aparecer
+    # junto do criterio quando ele existe (`bp["motivo"]`: gh ausente, repo
+    # sem remote, rate limit).
+    bp_rotulo = ""
+    if protegido is None:
+        bp_rotulo = (f" (não auditado: {bp['motivo']})"
+                     if bp.get("motivo") else gov_rotulo)
     eixo("Processo", [
-        (4, protegido, "branch de produção protegida", "P1",
+        (4, protegido, "branch de produção protegida" + bp_rotulo, "P1",
          f"A branch `{bp.get('branch', 'main')}` aceita push direto, sem revisão nem check obrigatório.",
          "Ligar proteção exigindo status check verde — é a única barreira que não depende de disciplina."),
         (2, _do_gov(docs.get("readme")), "README" + gov_rotulo, "P2",
@@ -559,7 +691,7 @@ def auditoria(snap):
         (2, bool(docs.get("changelog")) or None, "histórico de mudanças" + gov_rotulo, "P2",
          "Sem CHANGELOG.",
          "Gerar a partir dos commits se eles seguirem convenção."),
-    ], f"branch {'protegida' if protegido else 'desprotegida'}")
+    ], f"branch {_sim_nao(protegido, 'protegida', 'desprotegida', 'com proteção não auditada')}")
 
     ordem = {"P0": 0, "P1": 1, "P2": 2}
     achados.sort(key=lambda a: ordem.get(a[0], 9))
@@ -665,6 +797,18 @@ def findings(snap):
     for name, msg in _seguro(snap.get("errors"), dict, {}).items():
         out.append(("info", f"Coletor '{name}' não rodou: {msg}"))
 
+    # Coletor que nem chegou a ser TENTADO nao deixa rastro nenhum: nao esta
+    # em `collectors_run` e nao esta em `errors`. Um `--only gouvernance`
+    # (typo) produzia um laudo dizendo "Nenhum alerta nos limiares
+    # configurados" em cima de uma coleta que nao aconteceu.
+    rodaram = {str(c) for c in (_seguro(snap.get("collectors_run"), list) or [])}
+    falharam = set(_seguro(snap.get("errors"), dict, {}))
+    ausentes = [c for c in COLETORES_ESPERADOS if c not in rodaram and c not in falharam]
+    if ausentes:
+        out.append(("info", f"{len(ausentes)} coletor(es) fora desta coleta: "
+                            f"{', '.join(ausentes)}. Os critérios que dependem "
+                            f"deles saem como não auditados, e não como atendidos."))
+
     ordem = {"alto": 0, "medio": 1, "baixo": 2, "info": 3}
     out.sort(key=lambda x: ordem.get(x[0], 9))
     return out
@@ -691,6 +835,13 @@ def build_veredito(snap):
         # — mostra travessao no lugar da letra e um aviso proprio, com
         # classe CSS propria (nunca nota-F, que e vermelho).
         na = x["letra"] == "NA"
+        # Quantos criterios sustentam a letra. Sem isso, "F" com 1 de 4
+        # medidos e "F" com 4 de 4 sao a mesma imagem — e o primeiro e um
+        # veredito com 25% de base. No eixo NA a frase abaixo ja diz que
+        # nada foi medido; repetir "0 de N" seria ruido.
+        base = ('' if na else
+                f'<p class="eixo-base">{x["medidos"]} de {x["criterios"]} '
+                f'critérios auditados</p>')
         cards.append(
             f'<div class="eixo nota-{x["letra"]}">'
             f'<div class="letra">{"—" if na else x["letra"]}</div>'
@@ -698,6 +849,7 @@ def build_veredito(snap):
             f'<p class="eixo-resumo">{e(x["resumo"])}</p>'
             + ('<p class="eixo-na">não auditado — nenhum critério deste eixo pôde ser medido</p>'
                if na else '')
+            + base
             + f'<ul class="checklist">{checados}</ul></div></div>'
         )
 
@@ -961,6 +1113,8 @@ h3{font-size:13px;font-weight:700;letter-spacing:-.01em;margin:28px 0 8px}
              line-height:1.5}
 .eixo-na{font-size:11px;color:var(--soft);font-family:var(--mono);margin:0 0 8px;
          font-style:italic}
+.eixo-base{font-size:10.5px;color:var(--soft);font-family:var(--mono);margin:0 0 8px;
+           letter-spacing:.04em;opacity:.85}
 .checklist{list-style:none;padding:0;margin:0;font-size:11.5px;line-height:1.75}
 .checklist li{color:var(--soft);padding-left:17px;position:relative}
 .checklist li::before{position:absolute;left:0;font-family:var(--mono)}

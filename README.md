@@ -210,7 +210,8 @@ collects and commits the snapshot, is enough:
 python3 -m unittest discover -s scripts/tests -t scripts/tests
 ```
 
-82 tests, standard library only.
+136 tests, standard library only. The count is asserted by the suite itself
+(`scripts/tests/test_docs.py`), so this line cannot drift from the code again.
 
 ## License
 

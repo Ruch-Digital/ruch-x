@@ -583,5 +583,269 @@ class TestMilharOverflow(unittest.TestCase):
         self.assertNotIn("<script", html)
 
 
+# ----------------------------------------------------------------------
+# Fix wave final: achados da revisao de branch inteira (3 Critical, 6
+# Important, 8 Minor). Aqui ficam os que moram no render.
+# ----------------------------------------------------------------------
+
+def _criterio(snap, eixo, prefixo):
+    """(rotulo, ok) do criterio de um eixo, casado pelo INICIO do rotulo.
+
+    Casar pelo prefixo e nao pelo texto exato porque o rotulo carrega o
+    sufixo do nao-auditado — o guard trava o COMPORTAMENTO, nao a redacao.
+    """
+    eixos = {x["nome"]: x for x in render.auditoria(snap)[0]}
+    return next((rot, ok) for rot, ok in eixos[eixo]["checados"]
+                if rot.startswith(prefixo))
+
+
+class TestCritical1NenhumNoneNaTela(unittest.TestCase):
+    """O painel escrevia a string `None` dez vezes no lugar de "nao medi".
+
+    `render.py` interpolava `{freq}`, `{cx}`, `{ci_ok}`, `{desatual}` cru em
+    f-string de rotulo e de resumo — antes de saber se o valor existe. No
+    dashboard do PROPRIO ruch-x isso rendia "None/sem · lead Noneh · falha
+    None%", "None funções complexas" e "dependências atualizadas
+    (None/None)": o painel afirmando, em portugues de Python, numero que
+    ninguem apurou. E o mapa `nao_medido` que o coletor grava
+    (`git.nao_medido.hotspots`, `quality.nao_medido.complexity`) nunca
+    chegava na tela, contra o que `docs/extending.md` (regra 1) e
+    `docs/security.md` prometem por escrito.
+    """
+
+    @staticmethod
+    def _coletores_caidos():
+        """Snapshot realista de maquina sem gh, sem radon e sem Django."""
+        return _snap(
+            collectors_run=["stack", "code", "quality", "tests", "django", "git"],
+            errors={"governance": "gh: comando nao encontrado",
+                    "ci": "gh cli nao encontrado",
+                    "dora": "sem historico de deploy",
+                    "db": "sem DSN", "infra": "docker inacessivel"},
+            git={"branch": "main", "commit": "abc1234", "hotspots": None,
+                 "nao_medido": {"hotspots": "git log falhou"}},
+            quality={"complexity": None,
+                     "nao_medido": {"complexity": "radon nao instalado"}},
+            tests={"coverage_pct": None},
+            django={"pending_migrations": None, "deploy_issues": None,
+                    "other_issues": None,
+                    "nao_medido": {"pending_migrations": "projeto sem manage.py na raiz",
+                                   "deploy_issues": "projeto sem manage.py na raiz"}},
+        )
+
+    def test_a_string_None_nao_aparece_no_html(self):
+        html = render.render([self._coletores_caidos()])
+        self.assertNotIn("None", html)
+
+    def test_resumo_do_eixo_nao_afirma_numero_que_ninguem_mediu(self):
+        """O pior pedaco: a linha de resumo AFIRMAVA.
+
+        `0 segredo(s) · 0 action(s) sem pin` com o coletor `governance`
+        inteiro caido e o achado parqueado da Task 3 reconstruido uma linha
+        abaixo do criterio que a Task 7 consertou. `branch desprotegida` sem
+        `gh` e o que `docs/criteria.md` chama de "acusacao sem ter olhado".
+        """
+        eixos = {x["nome"]: x for x in render.auditoria(self._coletores_caidos())[0]}
+        self.assertNotIn("0 segredo(s)", eixos["Segurança"]["resumo"])
+        self.assertNotIn("0 action(s)", eixos["Segurança"]["resumo"])
+        self.assertNotIn("desprotegida", eixos["Processo"]["resumo"])
+        self.assertIn("não auditada", eixos["Processo"]["resumo"])
+        # "runbooks não" (veredito) contra "runbooks não auditado" (ausencia
+        # de veredito) — a assercao e no texto inteiro pra nao casar o
+        # primeiro dentro do segundo.
+        self.assertIn("runbooks não auditado", eixos["Confiabilidade"]["resumo"])
+        for nome in ("Entrega", "Qualidade", "Segurança", "Confiabilidade", "Processo"):
+            self.assertNotIn("None", eixos[nome]["resumo"])
+
+    def test_motivo_gravado_pelo_coletor_chega_na_tela(self):
+        """`nao_medido` existia no snapshot e morria nele."""
+        html = render.render([self._coletores_caidos()])
+        self.assertIn("git log falhou", html)          # git.nao_medido.hotspots
+        self.assertIn("radon nao instalado", html)     # quality.nao_medido.complexity
+        self.assertIn("projeto sem manage.py na raiz", html)
+
+    def test_criterio_de_coletor_que_nem_rodou_diz_por_que(self):
+        """Coletor que levanta excecao nao deixa a propria chave no snapshot,
+        so uma entrada em `errors` — o criterio saia "nao auditado" pelado."""
+        rot, ok = _criterio(self._coletores_caidos(), "Confiabilidade", "CI verde")
+        self.assertIsNone(ok)
+        self.assertIn("não auditado", rot)
+        self.assertIn("gh cli nao encontrado", rot)
+
+    def test_valor_medido_continua_aparecendo(self):
+        """Mutacao inversa: o fix nao pode apagar o numero que EXISTE."""
+        snap = _snap(dora={"deploys_por_semana": 12, "lead_time_p50_h": 3,
+                           "change_failure_rate": 4, "mttr_h": 1})
+        eixos = {x["nome"]: x for x in render.auditoria(snap)[0]}
+        self.assertIn("12/sem", eixos["Entrega"]["resumo"])
+        self.assertIn("lead 3h", eixos["Entrega"]["resumo"])
+        rot, ok = _criterio(snap, "Entrega", "frequência de deploy")
+        self.assertIn("12/semana", rot)
+        self.assertIs(ok, True)
+
+
+class TestCritical2DependenciaNodeEntraNaNota(unittest.TestCase):
+    """Metade-render do Critical 2 (a metade-coletor esta em
+    test_nao_medido.py). Com `total` presente, 37 de 40 dependencias velhas
+    finalmente descontam do eixo Seguranca — antes o criterio era descartado
+    e um projeto Node abandonado tirava a MESMA nota de um em dia."""
+
+    @staticmethod
+    def _com_deps(desatualizadas, total):
+        return _snap(governance={
+            "segredos_commitados": [], "workflows": {"sem_pin": [], "sem_permissions": []},
+            "dependabot": True, "docs": {"readme": "README.md"},
+            "dependencias": {"ferramenta": "npm", "desatualizadas": desatualizadas,
+                             "total": total},
+        })
+
+    def test_projeto_com_deps_velhas_tira_nota_menor_que_o_em_dia(self):
+        velho = {x["nome"]: x for x in render.auditoria(self._com_deps(37, 40))[0]}
+        em_dia = {x["nome"]: x for x in render.auditoria(self._com_deps(1, 40))[0]}
+        self.assertIs(_criterio(self._com_deps(37, 40), "Segurança",
+                                "dependências atualizadas")[1], False)
+        self.assertIs(_criterio(self._com_deps(1, 40), "Segurança",
+                                "dependências atualizadas")[1], True)
+        self.assertLess(velho["Segurança"]["pct"], em_dia["Segurança"]["pct"])
+
+    def test_sem_total_o_criterio_sai_como_nao_auditado_com_motivo(self):
+        snap = _snap(governance={
+            "segredos_commitados": [], "workflows": {},
+            "dependencias": {"ferramenta": "npm", "desatualizadas": 37, "total": None,
+                             "nao_medido": {"total": "package.json ilegível"}},
+        })
+        rot, ok = _criterio(snap, "Segurança", "dependências atualizadas")
+        self.assertIsNone(ok)
+        self.assertIn("package.json ilegível", rot)
+        self.assertNotIn("None", rot)
+
+
+class TestCritical3MetodoDaComplexidade(unittest.TestCase):
+    """O veredito do arquivo de maior atrito invertia conforme o radon estar
+    instalado na maquina de quem audita.
+
+    Sem radon a complexidade do mapa vem da contagem de `BRANCH_WORDS`, que o
+    coletor declara servir "pra ordenar arquivos entre si, nao produzir um
+    numero absoluto" — e o render comparava esse numero com um limiar
+    absoluto (150). Escala medida nos arquivos deste repositorio: collect.py
+    radon 473 / heuristica 354 (-25%), render.py 337 / 225 (-33%). Um alvo
+    que o radon poe em 180 (reprova, P1, -3 pontos) a heuristica poe em 120
+    (aprova, +3). A Task 4 criou `hotspots[].metodo` exatamente pra isso e o
+    render nunca lia.
+    """
+
+    @staticmethod
+    def _com_hotspot(complexity, metodo=None):
+        h = {"file": "alvo.py", "churn": 20, "complexity": complexity, "loc": 900}
+        if metodo:
+            h["metodo"] = metodo
+        return _snap(git={"hotspots": [h]})
+
+    def test_radon_acima_do_limiar_continua_reprovando(self):
+        rot, ok = _criterio(self._com_hotspot(180, "radon"), "Qualidade",
+                            "arquivo de maior atrito")
+        self.assertIs(ok, False)
+        self.assertNotIn("não auditado", rot)
+
+    def test_radon_abaixo_do_limiar_continua_aprovando(self):
+        _, ok = _criterio(self._com_hotspot(120, "radon"), "Qualidade",
+                          "arquivo de maior atrito")
+        self.assertIs(ok, True)
+
+    def test_heuristica_nao_e_julgada_contra_limiar_absoluto(self):
+        """O caso que inverte: 120 pela heuristica e o mesmo arquivo que o
+        radon poria em 180. Aprovar aqui e deixar o veredito depender do
+        ambiente do auditor, nao do codigo auditado."""
+        rot, ok = _criterio(self._com_hotspot(120, "heuristica"), "Qualidade",
+                            "arquivo de maior atrito")
+        self.assertIsNone(ok)
+        self.assertIn("complexidade estimada sem radon", rot)
+
+    def test_heuristica_alta_tambem_sai_do_denominador(self):
+        """Nem pra reprovar. A heuristica nao tem escala absoluta em nenhuma
+        das duas direcoes — e nao medir nao pode punir, do mesmo jeito que
+        nao pode premiar."""
+        _, ok = _criterio(self._com_hotspot(400, "heuristica"), "Qualidade",
+                          "arquivo de maior atrito")
+        self.assertIsNone(ok)
+
+    def test_snapshot_antigo_sem_metodo_nao_e_julgado(self):
+        """Snapshot anterior ao campo `metodo` (Task 4) tem procedencia
+        desconhecida: pode ser radon, pode ser heuristica. Nao se julga o
+        que nao se sabe de onde veio."""
+        rot, ok = _criterio(self._com_hotspot(180), "Qualidade",
+                            "arquivo de maior atrito")
+        self.assertIsNone(ok)
+        self.assertIn("não registrado", rot)
+
+
+class TestImportant1BaseDaNota(unittest.TestCase):
+    """Eixo com 1 de 4 criterios medidos recebia letra cheia: o `F` de um
+    eixo apoiado so em "nao existe docs/runbooks/" e visualmente identico ao
+    `F` de um eixo auditado inteiro."""
+
+    @staticmethod
+    def _so_runbooks():
+        return _snap(governance={"docs": {"runbooks": None},
+                                 "segredos_commitados": [], "workflows": {},
+                                 "dependencias": {}})
+
+    def test_eixo_declara_quantos_criterios_sustentam_a_letra(self):
+        eixos = {x["nome"]: x for x in render.auditoria(self._so_runbooks())[0]}
+        conf = eixos["Confiabilidade"]
+        self.assertEqual(conf["medidos"], 1)
+        self.assertEqual(conf["criterios"], 4)
+        self.assertEqual(conf["letra"], "F")
+        self.assertIn("1 de 4 critérios auditados", render.render([self._so_runbooks()]))
+
+    def test_a_contagem_nao_mexe_no_calculo_da_nota(self):
+        """Guard contra sobrecorrecao: a exposicao da base e informativa —
+        a nota tem que continuar sendo a mesma fracao de antes."""
+        eixos = {x["nome"]: x for x in render.auditoria(self._so_runbooks())[0]}
+        self.assertEqual(eixos["Confiabilidade"]["pct"], 0)
+
+
+class TestImportant2ColetorAusenteNoLaudo(unittest.TestCase):
+    """`--only gouvernance` (typo) filtrava tudo em silencio e o dashboard
+    desse snapshot dizia "ok — Nenhum alerta nos limiares configurados":
+    laudo limpo de uma coleta que nao aconteceu."""
+
+    def test_coletor_que_nem_foi_tentado_aparece_no_laudo(self):
+        snap = _snap(collectors_run=[], errors={})
+        html = render.render([snap])
+        self.assertIn("coletor(es) fora desta coleta", html)
+        self.assertNotIn("Nenhum alerta nos limiares configurados", html)
+
+    def test_coleta_completa_nao_reclama_de_ausencia(self):
+        """Mutacao inversa: snapshot com todos os coletores nao pode ganhar
+        um aviso inventado."""
+        snap = _snap(collectors_run=list(render.COLETORES_ESPERADOS), errors={})
+        self.assertNotIn("fora desta coleta", render.render([snap]))
+
+
+class TestMinor6RotuloDoDjango(unittest.TestCase):
+    """Repositorio que nem Django e exibia "avisos de segurança do framework
+    (não auditado: settings de dev)" — o rotulo culpava o motivo errado, que
+    e o texto do caso em que o check RODOU contra settings de dev."""
+
+    def test_repo_sem_django_nao_culpa_settings_de_dev(self):
+        snap = _snap(django={
+            "pending_migrations": None, "deploy_issues": None, "other_issues": None,
+            "nao_medido": {"deploy_issues": "projeto sem manage.py na raiz"},
+        })
+        rot, ok = _criterio(snap, "Segurança", "avisos de segurança do framework")
+        self.assertIsNone(ok)
+        self.assertIn("projeto sem manage.py", rot)
+        self.assertNotIn("settings de dev", rot)
+
+    def test_django_em_dev_continua_dizendo_settings_de_dev(self):
+        """Mutacao inversa: o motivo legitimo nao pode ter sumido."""
+        snap = _snap(django={"pending_migrations": [], "deploy_issues": [],
+                             "other_issues": [], "ambiente_de_producao": False})
+        rot, ok = _criterio(snap, "Segurança", "avisos de segurança do framework")
+        self.assertIsNone(ok)
+        self.assertIn("settings de dev", rot)
+
+
 if __name__ == "__main__":
     unittest.main()
