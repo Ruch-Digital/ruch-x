@@ -1,0 +1,424 @@
+{
+  "schema": 2,
+  "project": "ruch-x",
+  "generated_at": "2026-08-15T13:15:00-03:00",
+  "collectors_run": [
+    "stack",
+    "code",
+    "quality",
+    "tests",
+    "django",
+    "git",
+    "ci",
+    "governance",
+    "dora"
+  ],
+  "errors": {},
+  "stack": {
+    "detected": [
+      "Python"
+    ],
+    "primary": "Python",
+    "dependencies": null
+  },
+  "code": {
+    "tool": "builtin",
+    "total_loc": 5282,
+    "total_files": 9,
+    "by_language": [
+      {
+        "language": "Python",
+        "files": 9,
+        "code": 5282,
+        "comments": 0,
+        "blanks": 0,
+        "complexity": 0
+      }
+    ],
+    "by_app": [
+      {
+        "app": "scripts",
+        "code": 2673,
+        "tests": 2022,
+        "test_ratio": 0.76
+      }
+    ],
+    "comment_ratio": null,
+    "module_label": "Pasta"
+  },
+  "quality": {
+    "ruff": {
+      "total": 47,
+      "by_rule": [
+        {
+          "rule": "ISC004",
+          "count": 20
+        },
+        {
+          "rule": "FURB167",
+          "count": 9
+        },
+        {
+          "rule": "I001",
+          "count": 6
+        },
+        {
+          "rule": "RUF100",
+          "count": 3
+        },
+        {
+          "rule": "DTZ005",
+          "count": 2
+        },
+        {
+          "rule": "SIM117",
+          "count": 2
+        },
+        {
+          "rule": "PLW1510",
+          "count": 1
+        },
+        {
+          "rule": "S112",
+          "count": 1
+        },
+        {
+          "rule": "RUF059",
+          "count": 1
+        },
+        {
+          "rule": "F541",
+          "count": 1
+        },
+        {
+          "rule": "F401",
+          "count": 1
+        }
+      ],
+      "worst_files": [
+        {
+          "file": "scripts\\render.py",
+          "count": 20
+        },
+        {
+          "file": "scripts\\collect.py",
+          "count": 16
+        },
+        {
+          "file": "scripts\\doctor.py",
+          "count": 3
+        },
+        {
+          "file": "scripts\\tests\\test_nao_medido.py",
+          "count": 3
+        },
+        {
+          "file": "scripts\\tests\\test_render_hostil.py",
+          "count": 2
+        },
+        {
+          "file": "scripts\\tests\\test_caminhos.py",
+          "count": 1
+        },
+        {
+          "file": "scripts\\tests\\test_docs.py",
+          "count": 1
+        },
+        {
+          "file": "scripts\\tests\\test_redacao.py",
+          "count": 1
+        }
+      ]
+    },
+    "complexity": {
+      "blocks_analyzed": 343,
+      "avg": 4.1,
+      "above_10": 29,
+      "worst": [
+        {
+          "file": "scripts\\render.py",
+          "name": "auditoria",
+          "line": 434,
+          "complexity": 78,
+          "rank": "F"
+        },
+        {
+          "file": "scripts\\render.py",
+          "name": "findings",
+          "line": 763,
+          "complexity": 53,
+          "rank": "F"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_quality",
+          "line": 427,
+          "complexity": 44,
+          "rank": "F"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_dora",
+          "line": 1730,
+          "complexity": 38,
+          "rank": "E"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "parse_coverage",
+          "line": 560,
+          "complexity": 37,
+          "rank": "E"
+        },
+        {
+          "file": "scripts\\doctor.py",
+          "name": "main",
+          "line": 92,
+          "complexity": 34,
+          "rank": "E"
+        },
+        {
+          "file": "scripts\\render.py",
+          "name": "build_signals",
+          "line": 973,
+          "complexity": 30,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "module_candidates",
+          "line": 353,
+          "complexity": 27,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_django",
+          "line": 805,
+          "complexity": 26,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_code",
+          "line": 212,
+          "complexity": 24,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_db",
+          "line": 1085,
+          "complexity": 23,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "_deps_desatualizadas",
+          "line": 1612,
+          "complexity": 22,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "hotspots",
+          "line": 968,
+          "complexity": 21,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_infra",
+          "line": 1162,
+          "complexity": 20,
+          "rank": "C"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_ci",
+          "line": 1307,
+          "complexity": 19,
+          "rank": "C"
+        }
+      ],
+      "metodo": "radon"
+    }
+  },
+  "tests": {
+    "coverage_pct": null,
+    "by_app": [],
+    "test_count": null,
+    "duration_s": null,
+    "slowest": [],
+    "source": null,
+    "coverage_age_days": null
+  },
+  "django": {
+    "pending_migrations": null,
+    "deploy_issues": null,
+    "apps": null,
+    "models": null,
+    "version": null,
+    "settings_module": null,
+    "other_issues": null,
+    "nao_medido": {
+      "pending_migrations": "projeto sem manage.py na raiz",
+      "deploy_issues": "projeto sem manage.py na raiz",
+      "other_issues": "projeto sem manage.py na raiz"
+    }
+  },
+  "git": {
+    "branch": "main",
+    "commit": "4f64fa7",
+    "commits_30d": 26,
+    "commits_90d": 26,
+    "authors_30d": [
+      {
+        "author": "Wilkerson Carlos",
+        "commits": 26
+      }
+    ],
+    "hotspots": [
+      {
+        "file": "scripts/collect.py",
+        "churn": 18,
+        "complexity": 394,
+        "loc": 1712,
+        "score": 7092,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/render.py",
+        "churn": 11,
+        "complexity": 261,
+        "loc": 1253,
+        "score": 2871,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_render_hostil.py",
+        "churn": 8,
+        "complexity": 70,
+        "loc": 957,
+        "score": 560,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_nao_medido.py",
+        "churn": 11,
+        "complexity": 25,
+        "loc": 717,
+        "score": 275,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/doctor.py",
+        "churn": 4,
+        "complexity": 51,
+        "loc": 181,
+        "score": 204,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_caminhos.py",
+        "churn": 3,
+        "complexity": 12,
+        "loc": 96,
+        "score": 36,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_redacao.py",
+        "churn": 3,
+        "complexity": 5,
+        "loc": 269,
+        "score": 15,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_docs.py",
+        "churn": 1,
+        "complexity": 4,
+        "loc": 56,
+        "score": 4,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/_fake_repo.py",
+        "churn": 1,
+        "complexity": 4,
+        "loc": 41,
+        "score": 4,
+        "metodo": "heuristica"
+      }
+    ],
+    "age_days": 1
+  },
+  "ci": {
+    "runs_analyzed": 0,
+    "success_rate": null,
+    "cancelados": 0,
+    "cancelados_com_deploy_ok": [],
+    "avg_duration_s": null,
+    "max_duration_s": null,
+    "recent": []
+  },
+  "governance": {
+    "docs": {
+      "readme": "README.md",
+      "licenca": "LICENSE",
+      "contributing": null,
+      "changelog": null,
+      "security": null,
+      "instrucoes_agente": null,
+      "adr": null,
+      "runbooks": null,
+      "docs_dir": "docs"
+    },
+    "gitignore": {
+      "existe": true,
+      "ignora_env": false
+    },
+    "dependabot": false,
+    "pre_commit": false,
+    "editorconfig": false,
+    "containerizado": false,
+    "workflows": {
+      "count": 0,
+      "sem_pin": [],
+      "sem_permissions": [],
+      "permissions_no_job": [],
+      "arquivos": []
+    },
+    "branch_protection": {
+      "disponivel": true,
+      "repo": "Ruch-Digital/ruch-x",
+      "branch": "main",
+      "visibility": "PUBLIC",
+      "protegido": false,
+      "exige_review": null,
+      "exige_checks": null
+    },
+    "segredos_commitados": [],
+    "dependencias": {
+      "ferramenta": null,
+      "total": null,
+      "desatualizadas": null,
+      "exemplos": [],
+      "nao_medido": {
+        "desatualizadas": "nenhum manifesto de dependências reconhecido (requirements.txt, pyproject.toml ou package.json com npm)"
+      }
+    }
+  },
+  "dora": {
+    "workflows_de_deploy": [],
+    "branch": "main",
+    "deploys_analisados": 0,
+    "janela_dias": null,
+    "deploys_por_semana": null,
+    "lead_time_p50_h": null,
+    "change_failure_rate": null,
+    "mttr_h": null,
+    "ultimo_deploy": null
+  }
+}
