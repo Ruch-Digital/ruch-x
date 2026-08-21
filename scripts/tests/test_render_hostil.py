@@ -178,25 +178,59 @@ class TestSiblingWorkflowsNaoMedido(unittest.TestCase):
         rotulos = " ".join(r for r, _ in checklist)
         self.assertIn("boom: falha inesperada", rotulos)
 
-    def test_governance_presente_com_workflows_vazio_e_realmente_ok(self):
-        """Contraste: quando o coletor RODOU e workflows e legitimamente vazio
-        (sem .github/workflows), os dois criterios sao True de verdade — o
-        fix nao pode transformar "medido e limpo" em "nao medido"."""
+    def test_repo_sem_workflow_nenhum_vira_nada_a_auditar(self):
+        """Decisao do dono (2026-08-20), invertendo o comportamento que este
+        teste travava ate entao: repo SEM workflow nenhum ganhava os
+        criterios de pin (3) e permissions (2) por verdade vacua — 5 pontos
+        de graca em Seguranca sobre quem tem 1 workflow imperfeito. Agora
+        zero workflows = "nada a auditar" (None): nem premia nem pune.
+        """
         com_governance = _snap(governance={
-            "segredos_commitados": [], "workflows": {"sem_pin": [], "sem_permissions": []},
+            "segredos_commitados": [],
+            "workflows": {"count": 0, "sem_pin": [], "sem_permissions": []},
+            "dependencias": {},
+        })
+        eixos = {x["nome"]: x for x in render.auditoria(com_governance)[0]}
+        checklist = eixos["Segurança"]["checados"]
+        self.assertIsNone(self._por_prefixo(checklist, "actions com versão fixada"))
+        self.assertIsNone(self._por_prefixo(checklist, "workflows com permissions declarado"))
+        rotulos = " ".join(r for r, _ in checklist)
+        self.assertIn("nada a auditar", rotulos)
+
+    def test_workflow_existente_e_limpo_continua_creditando(self):
+        """Guard contra sobrecorrecao do "nada a auditar": quem TEM workflow
+        e esta com tudo pinado/declarado segue ganhando os criterios — o
+        fix so tira o credito de quem nao tem o que proteger."""
+        com_governance = _snap(governance={
+            "segredos_commitados": [],
+            "workflows": {"count": 2, "sem_pin": [], "sem_permissions": []},
             "dependencias": {},
         })
         eixos = {x["nome"]: x for x in render.auditoria(com_governance)[0]}
         checklist = eixos["Segurança"]["checados"]
         self.assertTrue(self._por_prefixo(checklist, "actions com versão fixada"))
         self.assertTrue(self._por_prefixo(checklist, "workflows com permissions declarado"))
-        # Coletor rodado nao pode deixar sufixo de nao-auditado nos criterios
-        # QUE DEPENDEM DELE — os rotulos saem limpos. (O criterio do Django no
-        # mesmo eixo tem um sufixo proprio e legitimo, de outro coletor.)
+        # Coletor rodado e com materia-prima: rotulos saem limpos, sem
+        # sufixo de nao-auditado nem de nada-a-auditar.
         rotulos = [r for r, _ in checklist]
         self.assertIn("actions com versão fixada", rotulos)
         self.assertIn("workflows com permissions declarado", rotulos)
         self.assertIn("atualização automática de dependências", rotulos)
+
+    def test_snapshot_antigo_sem_count_mas_com_lista_populada_ainda_mede(self):
+        """Snapshot de versao anterior nao tem `workflows.count`. Se as
+        listas denunciam workflow existente (sem_pin populado), o criterio
+        continua MEDIDO — reprovando de verdade — em vez de cair no
+        "nada a auditar"."""
+        com_governance = _snap(governance={
+            "segredos_commitados": [],
+            "workflows": {"sem_pin": ["actions/checkout@v4"], "sem_permissions": []},
+            "dependencias": {},
+        })
+        eixos = {x["nome"]: x for x in render.auditoria(com_governance)[0]}
+        checklist = eixos["Segurança"]["checados"]
+        self.assertIs(self._por_prefixo(checklist, "actions com versão fixada"), False)
+        self.assertTrue(self._por_prefixo(checklist, "workflows com permissions declarado"))
 
 
 class TestGovernanceAusenteNaoReprova(unittest.TestCase):
@@ -974,8 +1008,11 @@ class TestAjuste3AchadoDePermissionsNoJob(unittest.TestCase):
 
     @staticmethod
     def _snap_wf(sem_permissions, permissions_no_job):
+        # `count: 3` declara que ha workflows no repo — sem ele, a regra de
+        # 2026-08-20 (zero workflows = "nada a auditar") tornaria o fixture
+        # de listas vazias indistinguivel de repo sem CI.
         return _snap(governance={
-            "workflows": {"sem_pin": [], "sem_permissions": sem_permissions,
+            "workflows": {"count": 3, "sem_pin": [], "sem_permissions": sem_permissions,
                           "permissions_no_job": permissions_no_job},
             "segredos_commitados": [], "dependencias": {},
         })
@@ -1122,6 +1159,90 @@ class TestFixRound1TextoDoJobDeployNaoAfirmaFato(unittest.TestCase):
         itens = render.findings(self._snap_com_deploy_ok())
         nivel, _ = next((n, t) for n, t in itens if "cancelado" in t.lower() and "deploy" in t.lower())
         self.assertEqual(nivel, "alto")
+
+
+class TestMttrSemFalhaExplicaOTraco(unittest.TestCase):
+    """`mttr_h: None` tem DOIS motivos, e o painel dava o mesmo traco mudo
+    pros dois.
+
+    Depois do fix do DORA job-level (2026-08-21), o caso comum passou a ser
+    "nenhum deploy falhou na janela" — boa noticia — e um traco sem
+    explicacao le como "nao consegui medir", que e o oposto.
+
+    O rotulo NAO pode ser ingenuo: `mttr_h` tambem fica `None` quando um
+    deploy falhou e ainda NAO veio um verde depois dele. Escrever "nenhum
+    deploy falhou" ali seria o painel mentindo justamente no caso ruim.
+    Nos dois casos o criterio segue `None` (nem premia nem pune) — o que
+    muda e so a explicacao.
+    """
+
+    def test_sem_falha_na_janela_o_traco_ganha_motivo(self):
+        """O caso do ion depois do fix: 63 deploys, nenhum falhou."""
+        snap = _snap(dora={"deploys_por_semana": 41.4, "lead_time_p50_h": 0.35,
+                           "change_failure_rate": 0.0, "mttr_h": None,
+                           "deploys_analisados": 63})
+        rot, ok = _criterio(snap, "Entrega", "tempo de recuperação")
+        self.assertIsNone(ok, "nada a auditar nem premia nem pune")
+        self.assertIn("nada a auditar", rot)
+        self.assertIn("nenhum deploy falhou", rot)
+
+    def test_falha_ainda_sem_deploy_verde_nao_diz_que_ninguem_falhou(self):
+        """O caso que proibe o rotulo ingenuo: houve falha, a recuperacao e
+        que nao aconteceu ainda. O painel nao pode absolver."""
+        snap = _snap(dora={"deploys_por_semana": 3, "lead_time_p50_h": 2,
+                           "change_failure_rate": 50.0, "mttr_h": None,
+                           "deploys_analisados": 4})
+        rot, ok = _criterio(snap, "Entrega", "tempo de recuperação")
+        self.assertIsNone(ok)
+        self.assertNotIn("nenhum deploy falhou", rot)
+        self.assertIn("sem deploy verde depois", rot)
+
+    def test_mttr_medido_continua_limpo(self):
+        """Guard contra sobrecorrecao: com numero medido, nenhum sufixo
+        entra e o criterio segue valendo ponto."""
+        snap = _snap(dora={"deploys_por_semana": 12, "lead_time_p50_h": 3,
+                           "change_failure_rate": 4, "mttr_h": 1,
+                           "deploys_analisados": 20})
+        rot, ok = _criterio(snap, "Entrega", "tempo de recuperação")
+        self.assertIs(ok, True)
+        self.assertNotIn("nada a auditar", rot)
+        self.assertNotIn("sem deploy verde", rot)
+
+    def test_coletor_dora_ausente_continua_nao_auditado(self):
+        """Guard de fronteira: sem o coletor, o motivo continua sendo "não
+        auditado". O rotulo novo nao pode roubar o lugar do antigo — sao
+        afirmacoes diferentes ("nao medi" != "medi e nao houve")."""
+        snap = _snap(errors={"dora": "gh cli nao encontrado"})
+        rot, ok = _criterio(snap, "Entrega", "tempo de recuperação")
+        self.assertIsNone(ok)
+        self.assertIn("não auditado", rot)
+        self.assertNotIn("nenhum deploy falhou", rot)
+
+    def test_nao_medido_do_campo_vence_o_motivo_novo(self):
+        """Precedencia, travada aqui porque uma mutacao passou por ela:
+        se o coletor registrou que NAO MEDIU o mttr, esse motivo vence — o
+        rotulo novo so responde por "medi e nao houve o que recuperar".
+        As duas frases sao afirmacoes diferentes; a ordem entre elas nao
+        pode virar acidente."""
+        snap = _snap(dora={"deploys_por_semana": 41.4, "lead_time_p50_h": 0.35,
+                           "change_failure_rate": 0.0, "mttr_h": None,
+                           "deploys_analisados": 63,
+                           "nao_medido": {"mttr_h": "git show falhou"}})
+        rot, ok = _criterio(snap, "Entrega", "tempo de recuperação")
+        self.assertIsNone(ok)
+        self.assertIn("não auditado", rot)
+        self.assertIn("git show falhou", rot)
+        self.assertNotIn("nenhum deploy falhou", rot)
+
+    def test_snapshot_velho_sem_deploys_analisados_fica_como_era(self):
+        """Snapshot de antes do fix nao tem `deploys_analisados`. Sem saber
+        se houve deploy, nao da pra afirmar nada — segue mudo, que e a
+        direcao conservadora."""
+        snap = _snap(dora={"deploys_por_semana": 5, "lead_time_p50_h": 2,
+                           "change_failure_rate": 0.0, "mttr_h": None})
+        rot, ok = _criterio(snap, "Entrega", "tempo de recuperação")
+        self.assertIsNone(ok)
+        self.assertNotIn("nenhum deploy falhou", rot)
 
 
 if __name__ == "__main__":

@@ -376,6 +376,25 @@ def _nao_auditado(snap, coletor, *campo):
     return f" (não auditado: {generico})" if generico else ""
 
 
+def _motivo_do_mttr_vazio(snap, cfr):
+    """Por que `mttr_h` esta vazio — e sao dois motivos opostos.
+
+    Nenhuma falha na janela e BOA noticia (nada a auditar). Uma falha que
+    ainda nao teve deploy verde depois dela e o contrario, e produz o MESMO
+    `None`. O painel nao pode dar a mesma frase pros dois: dizer "nenhum
+    deploy falhou" no segundo caso e absolver quem esta quebrado agora.
+
+    Sem `deploys_analisados` (snapshot anterior ao fix de 2026-08-21) nao da
+    pra afirmar nem um nem outro — segue mudo, que e a direcao conservadora.
+    """
+    analisados = _seguro(dig(snap, "dora", "deploys_analisados"), int)
+    if not analisados or cfr is None:
+        return ""
+    if cfr == 0:
+        return " (nenhum deploy falhou na janela — nada a auditar)"
+    return " (falha sem deploy verde depois na janela)"
+
+
 def _sim_nao(ok, sim="sim", nao="não", na="não auditado"):
     """Tres estados no resumo do eixo. `None` NAO e "não"."""
     return na if ok is None else (sim if ok else nao)
@@ -485,9 +504,13 @@ def auditoria(snap):
          + (_nao_auditado(snap, "dora", "change_failure_rate") if cfr is None else ""), "P1",
          f"{cfr}% das mudanças que chegam na branch de produção falham no pipeline.",
          "Gatear o merge com a suíte e rodar o teste do módulo tocado antes do push."),
+        # Dois motivos diferentes produzem `mttr_h: None` — o coletor nao
+        # ter medido, ou nao haver falha pra recuperar. `_nao_auditado` cobre
+        # o primeiro; `_motivo_do_mttr_vazio`, o segundo (ver o helper).
         (2, None if mttr is None else n_mttr in bom,
          f"tempo de recuperação ({_valor(mttr, 'h')})"
-         + (_nao_auditado(snap, "dora", "mttr_h") if mttr is None else ""), "P1",
+         + ((_nao_auditado(snap, "dora", "mttr_h")
+             or _motivo_do_mttr_vazio(snap, cfr)) if mttr is None else ""), "P1",
          f"Leva {mttr}h em média pra recuperar de uma falha de deploy.",
          "Rollback documentado e imagem anterior sempre disponível encurtam isso pra minutos."),
     ], f"{_valor(freq, '/sem')} · lead {_valor(lead, 'h')} · "
@@ -590,6 +613,18 @@ def auditoria(snap):
     # "sem permissions" como "sem nada": 2 workflows com o job ja restrito e
     # 1 sem restricao nenhuma sao problemas de tamanho bem diferente.
     perm_no_job = _seguro(wf.get("permissions_no_job"), list) or []
+    # Decisao do dono (2026-08-20): repo SEM workflow nenhum nao "passa" nos
+    # criterios de pin/permissions — `sem_pin == []` com zero workflows e
+    # verdade vacua (nao ha o que proteger), e valia 5 pontos de graca em
+    # Seguranca sobre quem tem 1 workflow imperfeito. Zero workflows =>
+    # "nada a auditar" (None): nem premia nem pune, e o rotulo explica.
+    # `count` existe em snapshot novo; num snapshot antigo sem o campo, um
+    # repo COM workflow aparece pelas listas nao-vazias — e o antigo "limpo"
+    # cai em "nada a auditar" (conservador: nunca infla a nota).
+    n_wf = _seguro(wf.get("count"), (int, float))
+    tem_wf = bool(n_wf) or bool(sem_pin) or bool(sem_perm) or bool(perm_no_job)
+    wf_sem_nada = wf_raw is not None and not tem_wf
+    rotulo_sem_wf = " (sem workflow no repositório — nada a auditar)" if wf_sem_nada else ""
     deps = _seguro(gov.get("dependencias"), dict, {})
     desatual = _seguro(deps.get("desatualizadas"), (int, float))
     total_deps = _seguro(deps.get("total"), (int, float))
@@ -600,18 +635,22 @@ def auditoria(snap):
     # `governance` inteiro caido — era o achado parqueado da Task 3
     # reconstruido uma linha abaixo do criterio que a Task 7 consertou.
     n_seg = len(seg) if seg is not None else None
-    n_pin = len(sem_pin) if wf_raw is not None else None
+    # `wf_sem_nada` tambem zera o resumo: "0 action(s) sem pin" num repo sem
+    # workflow e a mesma afirmacao vacua do criterio, uma linha acima.
+    n_pin = len(sem_pin) if (wf_raw is not None and not wf_sem_nada) else None
     eixo("Segurança", [
         (5, None if seg is None else len(seg) == 0,
          "nenhum segredo commitado"
          + (_nao_medido(snap, "governance", "segredos_commitados") or gov_rotulo), "P0",
          f"{len(seg or [])} possível(is) segredo(s) em arquivo versionado: {_arquivos(seg)}.",
          "Revogar a credencial (o histórico do git guarda para sempre) e mover para variável de ambiente."),
-        (3, None if wf_raw is None else len(sem_pin) == 0, "actions com versão fixada" + gov_rotulo, "P1",
+        (3, None if (wf_raw is None or wf_sem_nada) else len(sem_pin) == 0,
+         "actions com versão fixada" + gov_rotulo + rotulo_sem_wf, "P1",
          f"{len(sem_pin)} action(s) referenciada(s) por tag móvel "
          f"(ex: {sem_pin[0] if sem_pin else '—'}).",
          "Fixar no SHA do commit: tag pode ser reapontada e roda código novo dentro do seu CI, com seus secrets."),
-        (2, None if wf_raw is None else len(sem_perm) == 0, "workflows com permissions declarado" + gov_rotulo, "P2",
+        (2, None if (wf_raw is None or wf_sem_nada) else len(sem_perm) == 0,
+         "workflows com permissions declarado" + gov_rotulo + rotulo_sem_wf, "P2",
          f"{len(sem_perm)} workflow(s) sem bloco `permissions` no topo — herdam token amplo "
          f"nos jobs que não o declaram."
          + (f" {len(perm_no_job)} já restringe(m) o job que escreve (ex: `packages: write`), "

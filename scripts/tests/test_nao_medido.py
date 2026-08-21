@@ -838,5 +838,213 @@ class TestFixRound1PortaoNoNomeDoJob(unittest.TestCase):
                          "job de gate nao pode disparar o achado de deploy bem-sucedido")
 
 
+class TestInfraExigeVinculo(unittest.TestCase):
+    """FU-RUCHX-INFRA-DO-HOST (decisao do dono, 2026-08-20).
+
+    O coletor `infra` le o Docker do HOST, nao o repo auditado. Em
+    2026-08-15 ele gravou containers de OUTRO produto dentro do snapshot
+    versionavel do ruch-x — vazamento de nome alheio + infra atribuida a
+    quem nao e dono. Sem vinculo declarado (`[infra] project_prefix` no
+    ruch-x.toml), o coletor recusa e vira "nao auditado"; nunca adivinha.
+    """
+
+    def test_sem_project_prefix_recusa_sem_tocar_o_docker(self):
+        def docker_proibido(*args, **kwargs):
+            raise AssertionError("sem vinculo declarado, nenhum comando docker pode rodar")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "run", side_effect=docker_proibido), \
+                 mock.patch.object(collect, "has", side_effect=docker_proibido):
+                with self.assertRaises(RuntimeError) as ctx:
+                    collect.collect_infra(root, {})
+        self.assertIn("project_prefix", str(ctx.exception))
+        self.assertIn("vinculo", str(ctx.exception))
+
+    def test_com_prefix_declarado_so_containers_do_projeto_entram(self):
+        stats = "\n".join([
+            json.dumps({"Name": "meuapp-web-1", "CPUPerc": "1%", "MemUsage": "10MiB",
+                        "MemPerc": "1%", "NetIO": "0B", "BlockIO": "0B"}),
+            json.dumps({"Name": "outroprojeto-db-1", "CPUPerc": "2%", "MemUsage": "99MiB",
+                        "MemPerc": "9%", "NetIO": "0B", "BlockIO": "0B"}),
+        ])
+        ps = json.dumps({"Names": "meuapp-web-1", "Image": "meuapp:latest",
+                         "Status": "Up", "State": "running"})
+
+        def fake_run(cmd, *args, **kwargs):
+            if "stats" in cmd:
+                return 0, stats, ""
+            if "ps" in cmd:
+                return 0, ps, ""
+            if "df" in cmd:
+                return 0, "", ""
+            raise AssertionError(f"comando inesperado: {cmd}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(collect, "run", side_effect=fake_run):
+                out = collect.collect_infra(
+                    root, {"infra": {"project_prefix": "meuapp"}})
+
+        nomes = [c["name"] for c in out["containers"]]
+        self.assertEqual(nomes, ["meuapp-web-1"],
+                         "container de outro projeto nao pode entrar no snapshot")
+        self.assertEqual(out["containers"][0]["image"], "meuapp:latest")
+
+
+class TestDoraMedeDeployNaoPipeline(unittest.TestCase):
+    """DORA mede o DEPLOY, nao a saude do pipeline (2026-08-21).
+
+    `collect_dora` classificava pelo `conclusion` do RUN INTEIRO. Num
+    workflow com varios jobs isso e uma troca de sujeito: qualquer job
+    vermelho — pip-audit, lint, suite — pintava de falho um deploy que
+    subiu normalmente.
+
+    Caso real que originou o fix (run 32391926125 do ion, 20/08): jobs
+    `Deploy staging (webhooks Coolify)` = success e `Auditoria de
+    seguranca (pip-audit)` = failure. O run inteiro e `failure`; o deploy
+    nao falhou. O DORA registrava change_failure_rate por causa dele.
+
+    Decisao do dono (custo medido: 1,45s por `gh run view`): checar
+    job-level SO nos runs vermelhos — run verde nao gasta chamada.
+    """
+
+    def _fake_run(self, runs, jobs_por_id=None, vistos=None):
+        """Fake do `run` cobrindo os 3 comandos que `collect_dora` dispara:
+        `gh run list`, `gh run view <id>` e o `git show` do lead time.
+
+        `vistos` (opcional) acumula os run_ids passados a `gh run view` — e
+        assim que se prova que run verde NAO gasta chamada de API.
+        """
+        jobs_por_id = jobs_por_id or {}
+
+        def fake(cmd, *args, **kwargs):
+            if "run" in cmd and "list" in cmd:
+                return 0, json.dumps(runs), ""
+            if "run" in cmd and "view" in cmd:
+                run_id = int(cmd[cmd.index("view") + 1])
+                if vistos is not None:
+                    vistos.append(run_id)
+                jobs = jobs_por_id.get(run_id)
+                if jobs is None:
+                    return 1, "", "gh: not found"
+                return 0, json.dumps({"jobs": jobs}), ""
+            if "show" in cmd:  # git show -s --format=%cI <sha>, do lead time
+                return 0, "2026-08-13T08:00:00Z", ""
+            raise AssertionError(f"comando inesperado: {cmd}")
+        return fake
+
+    def _runs(self, *conclusoes, workflow="CI/CD"):
+        """Runs de deploy plausiveis: nome de workflow que casa
+        `deploy_keywords` (o "cd" de "CI/CD"), branch de producao, push."""
+        return [
+            {"conclusion": c,
+             "createdAt": f"2026-08-{13 + i:02d}T09:00:00Z",
+             "updatedAt": f"2026-08-{13 + i:02d}T09:10:00Z",
+             "workflowName": workflow, "headBranch": "main",
+             "event": "push", "headSha": f"sha{i}", "databaseId": 2000 + i}
+            for i, c in enumerate(conclusoes)
+        ]
+
+    def _dora(self, runs, jobs_por_id=None, vistos=None, cfg=None):
+        cfg = cfg or {"dora": {"branch": "main"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"x.txt": "x"})
+            with mock.patch.object(collect, "has", return_value=True), \
+                 mock.patch.object(
+                     collect, "run",
+                     side_effect=self._fake_run(runs, jobs_por_id, vistos)):
+                return collect.collect_dora(root, cfg)
+
+    # -- o caso do ion -----------------------------------------------------
+
+    def test_run_vermelho_com_job_de_deploy_verde_nao_e_falha_de_mudanca(self):
+        """O caso exato do run 32391926125: o deploy subiu, o pip-audit caiu."""
+        runs = self._runs("success", "failure")
+        jobs = {2001: [{"name": "Deploy staging (webhooks Coolify)",
+                        "conclusion": "success"},
+                       {"name": "Auditoria de seguranca (pip-audit)",
+                        "conclusion": "failure"}]}
+        out = self._dora(runs, jobs)
+        self.assertEqual(out["deploys_analisados"], 2,
+                         "o deploy aconteceu — continua no denominador")
+        self.assertEqual(out["change_failure_rate"], 0.0,
+                         "job de deploy verde nao pode contar como falha")
+        self.assertEqual(out["reclassificacao"]["deploy_ok_apesar_do_run"], 1)
+
+    def test_run_vermelho_com_job_de_deploy_vermelho_continua_falha(self):
+        """Guard contra sobrecorrecao: deploy que falhou DE VERDADE segue
+        contando. Sem ele, o fix poderia simplesmente zerar o CFR sempre."""
+        runs = self._runs("success", "failure")
+        jobs = {2001: [{"name": "Deploy staging (webhooks Coolify)",
+                        "conclusion": "failure"}]}
+        out = self._dora(runs, jobs)
+        self.assertEqual(out["deploys_analisados"], 2)
+        self.assertEqual(out["change_failure_rate"], 50.0)
+        self.assertEqual(out["reclassificacao"]["deploy_ok_apesar_do_run"], 0)
+
+    def test_run_vermelho_sem_job_de_deploy_sai_da_conta_inteira(self):
+        """Build morreu antes do deploy: nao houve deploy. Nao e falha de
+        deploy nem deploy bem-sucedido — sai do numerador E do denominador.
+        """
+        runs = self._runs("success", "failure")
+        jobs = {2001: [{"name": "Build imagem Docker", "conclusion": "failure"},
+                       {"name": "Checks rapidos (gate de deploy)",
+                        "conclusion": "success"}]}
+        out = self._dora(runs, jobs)
+        self.assertEqual(out["deploys_analisados"], 1,
+                         "run que nunca deployou nao e um deploy")
+        self.assertEqual(out["change_failure_rate"], 0.0)
+        self.assertEqual(out["reclassificacao"]["sem_job_de_deploy"], 1)
+
+    def test_job_de_portao_nao_conta_como_deploy(self):
+        """`Checks rapidos (gate de deploy)` tem "deploy" no nome e NAO
+        deploya — o run cai em "sem job de deploy", nunca em "deploy ok".
+        Reusa `_job_parece_deploy`, ja travada por 4 testes."""
+        runs = self._runs("failure")
+        jobs = {2000: [{"name": "Checks rapidos (gate de deploy)",
+                        "conclusion": "success"}]}
+        out = self._dora(runs, jobs)
+        self.assertEqual(out["reclassificacao"]["deploy_ok_apesar_do_run"], 0,
+                         "job de portao verde nao pode virar 'o deploy subiu'")
+        self.assertEqual(out["reclassificacao"]["sem_job_de_deploy"], 1)
+
+    # -- direcao conservadora ---------------------------------------------
+
+    def test_gh_run_view_mudo_mantem_a_falha(self):
+        """Nao conseguir checar NAO pode virar absolvicao: sem resposta do
+        `gh`, o run segue contando como falha (a direcao que nunca infla a
+        nota) e o snapshot registra que ficou sem apurar."""
+        runs = self._runs("failure")
+        out = self._dora(runs, jobs_por_id={})  # nenhum id responde
+        self.assertEqual(out["deploys_analisados"], 1)
+        self.assertEqual(out["change_failure_rate"], 100.0)
+        self.assertEqual(out["reclassificacao"]["sem_resposta"], 1)
+
+    def test_run_verde_nao_gasta_chamada_de_api(self):
+        """A decisao de custo do dono, travada por teste: `gh run view` so
+        roda pros vermelhos. 5 verdes = zero chamadas."""
+        vistos = []
+        runs = self._runs("success", "success", "success", "success", "success")
+        out = self._dora(runs, vistos=vistos)
+        self.assertEqual(vistos, [], "run verde nao pode gastar chamada de API")
+        self.assertEqual(out["change_failure_rate"], 0.0)
+        self.assertEqual(out["reclassificacao"]["vermelhos_checados"], 0)
+
+    def test_teto_de_vermelhos_fica_registrado_e_nao_corta_calado(self):
+        """Corte silencioso le como "apurei tudo". Acima do teto o run segue
+        contando como falha e o snapshot diz quantos ficaram de fora."""
+        runs = self._runs(*(["failure"] * 3))
+        jobs = {2000 + i: [{"name": "Deploy staging", "conclusion": "success"}]
+                for i in range(3)}
+        out = self._dora(runs, jobs, cfg={"dora": {"branch": "main",
+                                                   "limite_vermelhos": 2}})
+        self.assertEqual(out["reclassificacao"]["vermelhos_checados"], 2)
+        self.assertEqual(out["reclassificacao"]["acima_do_teto"], 1)
+        self.assertGreater(out["change_failure_rate"], 0.0,
+                           "o nao-checado continua contando como falha")
+
+
 if __name__ == "__main__":
     unittest.main()

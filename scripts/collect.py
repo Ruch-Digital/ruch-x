@@ -1165,10 +1165,25 @@ def collect_infra(root, cfg):
     docker client pro host: DOCKER_HOST=ssh://usuario@servidor. Mesma leitura,
     zero acoplamento com a versao do painel.
     """
+    icfg = cfg.get("infra", {})
+
+    # FU-RUCHX-INFRA-DO-HOST (decisao do dono, 2026-08-20): este coletor le o
+    # Docker do HOST, nao o repositorio auditado — sem um vinculo DECLARADO
+    # repo<->containers ele atribuiria ao repo a infra da maquina inteira e
+    # vazaria nome de container de OUTROS projetos pro snapshot versionado
+    # (aconteceu em 2026-08-15: containers de outro produto dentro do
+    # snapshot do ruch-x). O vinculo e o `[infra] project_prefix` do
+    # ruch-x.toml; sem ele o coletor sai como "nao auditado" — nunca adivinha.
+    prefix = icfg.get("project_prefix")
+    if not prefix:
+        raise RuntimeError(
+            "sem vinculo declarado repo<->infra: defina [infra] project_prefix "
+            "no ruch-x.toml — sem ele a coleta atribuiria ao repo os "
+            "containers do host inteiro")
+
     if not has("docker"):
         raise RuntimeError("docker client nao encontrado")
 
-    icfg = cfg.get("infra", {})
     env = {}
     host = (env_or(icfg, "docker_host", "RUCHX_DOCKER_HOST")
             or os.environ.get("METRICAS_DOCKER_HOST") or os.environ.get("DOCKER_HOST"))
@@ -1218,9 +1233,10 @@ def collect_infra(root, cfg):
             continue
     out["disk"] = disk
 
-    prefix = icfg.get("project_prefix")
-    if prefix:
-        out["containers"] = [c for c in out["containers"] if prefix in (c.get("name") or "")]
+    # `prefix` e garantido la no topo (vinculo declarado e pre-condicao do
+    # coletor). So o que e do projeto entra no snapshot; lista vazia com
+    # prefix declarado e "medi e esta vazio", nao falha.
+    out["containers"] = [c for c in out["containers"] if prefix in (c.get("name") or "")]
     return out
 
 
@@ -1727,6 +1743,101 @@ def _e_deploy(nome_workflow, cfg):
     return any(p in n for p in palavras)
 
 
+# Quantos runs VERMELHOS, no maximo, o DORA abre pra ver se o deploy dentro
+# deles passou (1 chamada `gh run view` cada, ~1,45s medidos em 2026-08-21).
+# Run verde nao gasta chamada nenhuma: se o run inteiro concluiu com sucesso,
+# o job de deploy dele tambem concluiu. O teto existe pro repo com muito
+# vermelho na janela nao multiplicar chamadas de API — e o que fica de fora
+# NAO some calado: conta em `reclassificacao.acima_do_teto` e segue contando
+# como falha (direcao que nunca infla a nota).
+LIMITE_VERMELHOS_CHECADOS = 20
+
+
+def _resultado_do_job_de_deploy(root, run_id, cfg):
+    """O que aconteceu com o DEPLOY dentro de um run que concluiu vermelho.
+
+    O `conclusion` de um run e do WORKFLOW INTEIRO. Num pipeline com varios
+    jobs isso troca o sujeito da frase: no ion, um `pip-audit` vermelho ao
+    lado de um `Deploy staging (webhooks Coolify)` verde fazia o DORA
+    registrar uma "falha de mudanca" que nunca existiu (run 32391926125).
+
+    Retorna:
+      `"ok"`         — o job de deploy concluiu com sucesso: o deploy subiu,
+                       quem falhou foi outro job;
+      `"falhou"`     — o job de deploy concluiu com failure: falha de
+                       verdade, e a unica que o CFR deve contar;
+      `"sem_deploy"` — nenhum job de deploy concluido no run (o build morreu
+                       antes, o job foi pulado, ou o workflow ainda nem tinha
+                       deploy). Nao houve deploy: o run sai da conta inteira,
+                       nem numerador nem denominador;
+      `None`         — nao deu pra apurar (gh fora do ar, timeout, saida
+                       ilegivel). NUNCA vira absolvicao: quem chama mantem a
+                       falha contada.
+
+    "E um job de deploy" e inferido do NOME (`_job_parece_deploy`, que ja
+    sabe recusar o `Checks rapidos (gate de deploy)` do proprio ion); o
+    `conclusion` e medido.
+    """
+    if not run_id:
+        return None
+    rc, so, _ = run(["gh", "run", "view", str(run_id), "--json", "jobs"],
+                    cwd=root, timeout=30)
+    if rc != 0 or not so.strip():
+        return None
+    try:
+        data = json.loads(so)
+    except json.JSONDecodeError:
+        return None
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, list):
+        return None
+    de_deploy = [j for j in jobs
+                 if isinstance(j, dict) and _job_parece_deploy(j.get("name"), cfg)]
+    if not de_deploy:
+        return "sem_deploy"
+    if any(j.get("conclusion") == "success" for j in de_deploy):
+        return "ok"
+    if any(j.get("conclusion") == "failure" for j in de_deploy):
+        return "falhou"
+    # Job de deploy existe mas foi pulado/cancelado: o deploy nao aconteceu.
+    return "sem_deploy"
+
+
+def _reclassificar_pelo_job_de_deploy(root, deploys, cfg):
+    """Reclassifica a lista de deploys olhando o JOB, nao o run.
+
+    Devolve `(deploys, reclassificacao)`. Os contadores da reclassificacao
+    vao pro snapshot pra que a conta seja auditavel: quem le o painel
+    consegue ver quantos runs vermelhos eram deploy bem-sucedido, quantos
+    nem chegaram a deployar, e quantos ficaram sem apurar.
+    """
+    reclass = {"vermelhos_checados": 0, "deploy_ok_apesar_do_run": 0,
+               "sem_job_de_deploy": 0, "sem_resposta": 0, "acima_do_teto": 0}
+    teto = cfg.get("dora", {}).get("limite_vermelhos") or LIMITE_VERMELHOS_CHECADOS
+    mantidos = []
+    for d in deploys:
+        if d["ok"]:
+            mantidos.append(d)
+            continue
+        if reclass["vermelhos_checados"] >= teto:
+            reclass["acima_do_teto"] += 1
+            mantidos.append(d)
+            continue
+        reclass["vermelhos_checados"] += 1
+        resultado = _resultado_do_job_de_deploy(root, d.get("run_id"), cfg)
+        if resultado == "ok":
+            d["ok"] = True
+            reclass["deploy_ok_apesar_do_run"] += 1
+            mantidos.append(d)
+        elif resultado == "sem_deploy":
+            reclass["sem_job_de_deploy"] += 1  # nao entra: nao houve deploy
+        else:
+            if resultado is None:
+                reclass["sem_resposta"] += 1
+            mantidos.append(d)
+    return mantidos, reclass
+
+
 def collect_dora(root, cfg):
     """DORA (DevOps Research and Assessment): frequencia de deploy, lead time,
     taxa de falha de mudanca e tempo de recuperacao.
@@ -1739,7 +1850,8 @@ def collect_dora(root, cfg):
         raise RuntimeError("gh cli nao encontrado — DORA sai do historico do GitHub Actions")
 
     limite = cfg.get("dora", {}).get("limit", 120)
-    campos = "conclusion,createdAt,updatedAt,workflowName,headBranch,headSha,event"
+    campos = ("conclusion,createdAt,updatedAt,workflowName,headBranch,"
+              "headSha,event,databaseId")
     rc, so, se = run(["gh", "run", "list", "--limit", str(limite), "--json", campos], cwd=root)
     if rc != 0:
         raise RuntimeError(se.strip()[:200] or "gh run list falhou")
@@ -1775,16 +1887,21 @@ def collect_dora(root, cfg):
         deploys.append({
             "quando": _dt(r.get("createdAt")), "fim": _dt(r.get("updatedAt")),
             "ok": r.get("conclusion") == "success", "sha": r.get("headSha"),
-            "workflow": r.get("workflowName"),
+            "workflow": r.get("workflowName"), "run_id": r.get("databaseId"),
         })
     deploys = [d for d in deploys if d["quando"]]
     deploys.sort(key=lambda d: d["quando"])
+
+    # O `conclusion` do run e do workflow inteiro — aqui ele deixa de ser a
+    # palavra final sobre o deploy. Ver `_resultado_do_job_de_deploy`.
+    deploys, reclassificacao = _reclassificar_pelo_job_de_deploy(root, deploys, cfg)
 
     out = {"workflows_de_deploy": sorted({d["workflow"] for d in deploys}),
            "branch": branch_prod, "deploys_analisados": len(deploys),
            "janela_dias": None, "deploys_por_semana": None,
            "lead_time_p50_h": None, "change_failure_rate": None,
-           "mttr_h": None, "ultimo_deploy": None}
+           "mttr_h": None, "ultimo_deploy": None,
+           "reclassificacao": reclassificacao}
     if not deploys:
         return out
 

@@ -165,12 +165,14 @@ run_tests = false          # true faz o collect rodar pytest --cov (demora)
 
 [infra]
 docker_host = "ssh://root@meu-vps"   # Coolify e Easypanel: aponta pro host
-project_prefix = "meuprojeto"           # filtra containers do projeto
+project_prefix = "meuprojeto"           # OBRIGATORIO pro coletor infra: e o vinculo repo<->containers
 ```
 
 Coolify e Easypanel são ambos Docker por baixo, então a mesma configuração serve
 aos dois — muda só o padrão de nome dos containers, o que importa no
-`project_prefix`. Veja `references/infra-ci.md`.
+`project_prefix`. **Sem `project_prefix` declarado, o coletor `infra` sai
+como "não auditado"** — ele lê o Docker do host e não adivinha o que é do
+projeto. Veja `references/infra-ci.md`.
 
 **Segredo nunca entra no toml.** O DSN do banco vem de variável de ambiente:
 

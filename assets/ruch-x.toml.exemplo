@@ -46,7 +46,8 @@ settings_module = "meuprojeto.settings.production"
 # Easypanel e qualquer VPS: aponte o cliente Docker pro host por SSH.
 # Precisa de chave SSH sem senha. Teste com: DOCKER_HOST=ssh://root@host docker ps
 docker_host = "ssh://root@meu-vps"
-project_prefix = "meuprojeto"   # filtra containers quando o host tem vários projetos
+project_prefix = "meuprojeto"   # OBRIGATÓRIO pro coletor infra: vínculo repo<->containers
+                                # (sem ele a seção sai como "não auditado" — o Docker é do host)
 
 [ci]
 limit = 40                       # quantas execuções do GitHub Actions analisar
@@ -57,6 +58,9 @@ limit = 40                       # quantas execuções do GitHub Actions analisa
 deploy_keywords = ["deploy", "release", "publish", "cd"]
 branch = "main"                  # só o que roda na branch de produção conta
 limit = 120                      # execuções analisadas para as métricas DORA
+limite_vermelhos = 20            # quantas execuções VERMELHAS abrir job a job para
+                                 # ver se o deploy em si falhou (execução verde não
+                                 # gasta chamada; o que passar do teto conta como falha)
 
 [db]
 # O DSN vem de RUCHX_DATABASE_URL (ou DATABASE_URL). Use usuário SOMENTE LEITURA:

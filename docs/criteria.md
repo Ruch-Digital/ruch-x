@@ -54,9 +54,37 @@ tool.
 Source: DORA / *Accelerate* / State of DevOps. Derived from GitHub Actions
 history plus git; nothing is instrumented in the project.
 
-A run counts as a deploy when its workflow name matches one of
+A run is a *deploy candidate* when its workflow name matches one of
 `deploy_keywords`, it ran on the production branch, its event was `push` or
 `workflow_dispatch`, and it concluded as success or failure.
+
+**A run's conclusion is not the deploy's conclusion.** In a pipeline with
+several jobs, one red `pip-audit` beside a green `Deploy staging` turns the
+whole run red while the deploy shipped normally — and counting that as a
+failed change measures pipeline health, not delivery. Candidates that
+concluded red are therefore opened one level down (`gh run view --json
+jobs`) and judged by the deploy job itself:
+
+| Deploy job inside a red run | Counted as |
+|---|---|
+| concluded `success` | a successful deploy — something else is what failed |
+| concluded `failure` | a failed deploy — the only case the failure rate counts |
+| absent, skipped or cancelled | **not a deploy at all** — dropped from both numerator and denominator |
+| impossible to check (`gh` silent) | a failed deploy — a missing answer never absolves |
+
+Green runs are never opened: a run that concluded successfully had a
+successful deploy job too. The cost is one API call for the listing plus one
+per *red* run (~1.5 s each), capped at `LIMITE_VERMELHOS_CHECADOS` (20,
+overridable with `[dora] limite_vermelhos`). Anything past the cap stays
+counted as a failure and is reported — the audit never trims in silence. The
+snapshot's `reclassificacao` block carries the whole count (how many red runs
+were checked, how many had shipped anyway, how many never deployed, how many
+went unanswered), so the rate can be audited instead of trusted.
+
+Being a deploy job is inferred from the job **name**; its conclusion is
+measured. A job whose name carries gate/check/lint/test never counts as a
+deploy however much "deploy" appears in it — `Checks rapidos (gate de
+deploy)` decides *whether* the deploy runs, it does not run it.
 
 Performance bands (`NIVEIS_DORA` in `render.py`):
 
@@ -79,7 +107,24 @@ A criterion is met at **elite or high**.
 Lead time is measured from the commit date to the **end** of the run that
 shipped it, and samples outside `0 ≤ h < 720` are discarded as clock noise.
 MTTR is the median gap from a failed deploy to the next green deploy of the same
-workflow.
+workflow — and it is empty for two opposite reasons, which the panel spells
+out rather than collapsing into one dash: no deploy failed in the window
+(nothing to audit), or one failed and no green deploy has followed it yet.
+
+Three limits worth stating plainly, because this is the axis people show
+to a non-technical partner:
+
+1. **A successful deploy means the deploy step succeeded — not that the
+   application is healthy.** Where shipping is delegated (a webhook to
+   Coolify, ArgoCD, a queue), a 200 proves the request was accepted and
+   nothing more. Nothing in this axis observes the running service.
+2. **Deploy frequency still counts runs, not deploy jobs.** Checking every
+   candidate job-level would cost one API call per run (~1.5 s × the whole
+   window) to correct a bias that only appears if a deploy job gets skipped
+   inside a green run. Known, measured, and deliberately not paid.
+3. **"Production" is wherever the production branch deploys to.** A project
+   that only has a staging environment gets staging numbers — the metrics
+   are still meaningful, but they are not evidence of production delivery.
 
 Without `gh` the whole axis is unmeasurable, and it correctly gets no letter.
 
@@ -107,8 +152,14 @@ chain.
 | Criterion | Weight | Priority | Met when | Not audited when |
 |---|---|---|---|---|
 | No committed secret | 5 | P0 | the scan found nothing | `git ls-files` failed — nothing was scanned |
-| Actions pinned to a SHA | 3 | P1 | no `uses:` with a moving ref | the `governance` collector did not run |
+| Actions pinned to a SHA | 3 | P1 | no `uses:` with a moving ref | the `governance` collector did not run, **or** the repo has zero workflows (nothing to audit) |
 | Workflows declare `permissions` | 2 | P2 | every workflow has a top-level `permissions:` | idem |
+
+A repository with **no workflows at all** is *not* credited on the two workflow
+criteria: `"no unpinned action"` with zero workflows is vacuously true, and
+before 2026-08-20 it granted 5 free points over a repo with one imperfect
+workflow. Zero workflows now reads as "nothing to audit" — excluded from the
+score, neither reward nor penalty.
 | Dependencies up to date | 2 | P2 | fewer than 25 % outdated | `pip`/`npm` could not produce both counts |
 | Automated dependency updates | 2 | P2 | `.github/dependabot.yml` or `.github/renovate.json` exists | the `governance` collector raised |
 | Framework security warnings | 3 | P1 | `check --deploy` reported no `security.*` | `check --deploy` did not run, **or** `[django] settings_module` is unset |

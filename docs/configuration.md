@@ -66,7 +66,7 @@ get an actual verdict, and export whatever variables those settings require
 | Key | Default | What it does |
 |---|---|---|
 | `docker_host` | the local Docker socket | Value of `DOCKER_HOST` for the three `docker` calls. `ssh://user@host` reads a remote machine (Coolify, Easypanel, a bare VPS) over SSH, which requires a passphrase-less key. |
-| `project_prefix` | unset | Keeps only containers whose name contains this string — useful when one host runs several projects. |
+| `project_prefix` | unset — **required for the `infra` collector to run** | Keeps only containers whose name contains this string. Docker belongs to the *host*, not to the audited repository: without a declared link the collector would attribute every container on the machine to the repo (and leak other projects' names into the versioned snapshot), so since 2026-08-20 it refuses and the section shows as *not audited* instead. |
 
 Precedence: `RUCHX_DOCKER_HOST` → `[infra] docker_host` → `METRICAS_DOCKER_HOST`
 → `DOCKER_HOST`.
@@ -123,6 +123,7 @@ the toml is committed, the environment is not.
 | `limit` | `120` | How many runs are fetched for the DORA metrics. Deploys are a subset of these, so a low limit shortens the measurement window rather than biasing it. |
 | `branch` | the repository's default branch, from `gh repo view` | Only runs on this branch count as deploys. Without the filter, pull-request CI inflates deploy frequency. |
 | `deploy_keywords` | `["deploy", "release", "publish", "cd"]` | A run counts as a deploy when its workflow name contains one of these (case-insensitive substring). |
+| `limite_vermelhos` | `20` | How many *red* candidate runs get opened job-level to see whether the deploy itself failed (one `gh run view` each, ~1.5 s). Green runs are never opened. Runs past the cap stay counted as failures and are reported in `reclassificacao.acima_do_teto`. |
 
 ## Environment variables
 

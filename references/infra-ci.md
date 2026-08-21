@@ -19,8 +19,11 @@ local instalado. Teste antes com `DOCKER_HOST=ssh://root@meu-vps docker ps`.
 Isso lê o mesmo que `docker stats` leria no servidor, sem abrir porta nenhuma e
 sem acoplar a skill à versão do painel.
 
-Se o servidor hospeda vários projetos, use `project_prefix` no toml para filtrar
-só os containers que interessam.
+O `project_prefix` no toml é **obrigatório** para o coletor `infra` rodar
+(decisão de 2026-08-20): ele lê o Docker do **host**, não o repositório — sem
+um vínculo declarado, atribuiria ao repo auditado os containers da máquina
+inteira e vazaria nome de projeto alheio para o snapshot versionado. Sem o
+prefixo, a seção sai como "não auditado".
 
 ### Diferenças de nomenclatura entre os painéis
 
