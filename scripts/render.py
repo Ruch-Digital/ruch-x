@@ -376,6 +376,47 @@ def _nao_auditado(snap, coletor, *campo):
     return f" (não auditado: {generico})" if generico else ""
 
 
+def _observabilidade(snap, gov):
+    """`(ok, sufixo_do_rotulo)` do criterio de observabilidade.
+
+    Trocou de sujeito em 2026-08-21. Media `tem_alerta = bool(containers) or
+    bool(db)`: a variavel prometia alerta e olhava container do HOST, entao um
+    projeto com 45 alertas versionados tirava a mesma nota de um com zero — e
+    um projeto sem nada passava se houvesse qualquer container de pe na
+    maquina de quem rodou a auditoria. Agora o sinal vem do REPOSITORIO
+    (`governance.observabilidade`), que e onde regra de alerta e config de
+    stack de fato moram.
+
+    Reprova, mas so de quem ENTREGA (decisao do dono): se o DORA identificou
+    workflow de deploy, o projeto sobe pra algum lugar e precisa saber quando
+    aquilo quebra. Biblioteca que nao deploya nao tem o que observar, e cai em
+    "nada a auditar" — mesmo tratamento do fim dos 5 pontos de graca.
+    """
+    obs = _seguro(gov.get("observabilidade"), dict)
+    if obs is None:
+        # Snapshot anterior ao campo, ou coletor fora do ar. Ausencia de dado
+        # nao vira acusacao.
+        return None, _nao_auditado(snap, "governance")
+
+    alertas = _seguro(obs.get("alertas"), int) or 0
+    stack = _seguro(obs.get("stack"), list) or []
+    if alertas:
+        return True, f" ({alertas} alerta(s) declarado(s) no repositório)"
+    if stack:
+        return False, (" (coleta métrica — %s — e nenhum alerta declarado)"
+                       % ", ".join(stack[:3]))
+
+    # Nada declarado: so e cobrado de quem entrega.
+    wf_deploy = _seguro(dig(snap, "dora", "workflows_de_deploy"), list)
+    if wf_deploy is None:
+        # Sem o coletor `dora` nao da pra saber se o projeto entrega. Nao
+        # afirmar vale mais que afirmar errado.
+        return None, _nao_auditado(snap, "dora")
+    if not wf_deploy:
+        return None, " (nenhum deploy identificado — nada a auditar)"
+    return False, " (nada declarado no repositório)"
+
+
 def _motivo_do_mttr_vazio(snap, cfr):
     """Por que `mttr_h` esta vazio — e sao dois motivos opostos.
 
@@ -696,7 +737,7 @@ def auditoria(snap):
     ], f"{_valor(n_seg)} segredo(s) · {_valor(n_pin)} action(s) sem pin")
 
     # ---------------- Confiabilidade ----------------
-    tem_alerta = bool(dig(snap, "infra", "containers")) or bool(snap.get("db"))
+    obs_ok, obs_rotulo = _observabilidade(snap, gov)
     runbooks = dig(snap, "governance", "docs", "runbooks")
     pend = _seguro(dig(snap, "django", "pending_migrations"), list)
     ci_ok = _seguro(dig(snap, "ci", "success_rate"), (int, float))
@@ -722,11 +763,10 @@ def auditoria(snap):
          + (_nao_auditado(snap, "django", "pending_migrations") if pend is None else ""), "P2",
          f"{len(pend or [])} migration(s) pendente(s) no ambiente medido.",
          "Aplicar ou confirmar que o alvo da medição é o ambiente certo."),
-        (2, tem_alerta or None,
-         "infraestrutura observável"
-         + ("" if tem_alerta else (_nao_auditado(snap, "db") or _nao_auditado(snap, "infra"))), "P2",
-         "Nenhuma métrica de runtime coletada (containers/banco).",
-         "Expor métrica de container e banco — sem isso, incidente vira adivinhação."),
+        (2, obs_ok, "infraestrutura observável" + obs_rotulo, "P2",
+         "O repositório não declara como se descobre que a aplicação quebrou.",
+         "Declarar regra de alerta versionada e um runbook por alerta — sem isso, "
+         "incidente vira adivinhação."),
     ], f"CI {_valor(ci_ok, '%')} · runbooks {_sim_nao(_do_gov(runbooks))}")
 
     # ---------------- Processo ----------------

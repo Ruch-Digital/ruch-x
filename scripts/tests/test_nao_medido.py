@@ -1046,5 +1046,103 @@ class TestDoraMedeDeployNaoPipeline(unittest.TestCase):
                            "o nao-checado continua contando como falha")
 
 
+REGRA_PROMETHEUS = """groups:
+  - name: slos
+    rules:
+      - alert: ErrorBudgetBurnRapido
+        expr: burnrate5m > 14.4
+        annotations:
+          runbook: docs/deploy/runbooks/slo-availability.md
+      - alert: LatenciaP95Alta
+        expr: latency_p95 > 1
+      - record: job:latency_p95
+        expr: histogram_quantile(0.95, rate(bucket[5m]))
+"""
+
+WORKFLOW_GITHUB = """name: CI/CD
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: notifica
+        run: |
+          alert: deploy falhou
+"""
+
+
+class TestObservabilidadeLidaDoRepositorio(unittest.TestCase):
+    """"Infraestrutura observavel" passa a ser lida do REPOSITORIO.
+
+    O criterio media `docker stats` do host: qualquer container rodando
+    valia "observavel". Um projeto com 45 alertas Prometheus versionados
+    tirava a mesma nota de um com zero — e um projeto sem observabilidade
+    nenhuma passava se houvesse um Postgres de pe na maquina de quem rodou
+    a auditoria.
+
+    O sinal certo ja estava no repo o tempo todo: regra de alerta e config
+    de stack sao ARQUIVOS. Ler isso funciona em qualquer projeto, inclusive
+    onde a skill nao tem acesso ao Docker do host.
+    """
+
+    def _gov(self, **arquivos):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **arquivos)
+            return collect.collect_governance(root, {})["observabilidade"]
+
+    def test_conta_alerta_de_regra_prometheus(self):
+        obs = self._gov(**{
+            "infra/observability/images/prometheus/rules/slos.yml": REGRA_PROMETHEUS,
+            "app.py": "x = 1\n"})
+        self.assertEqual(obs["alertas"], 2, "duas chaves `alert:`, o `record:` nao conta")
+        self.assertIn("prometheus", obs["stack"])
+        self.assertIn("infra/observability/images/prometheus/rules/slos.yml",
+                      obs["arquivos_de_regra"])
+
+    def test_workflow_do_github_nao_vira_alerta(self):
+        """Guard contra sobrecorrecao — o falso positivo mais provavel: um
+        step chamado "alert" num workflow nao e uma regra de alerta."""
+        obs = self._gov(**{".github/workflows/ci.yml": WORKFLOW_GITHUB,
+                           "app.py": "x = 1\n"})
+        self.assertEqual(obs["alertas"], 0)
+        self.assertEqual(obs["arquivos_de_regra"], [])
+
+    def test_stack_declarada_sem_alerta_nenhum(self):
+        """Coleta metrica e nao avisa ninguem: a stack aparece, o contador
+        fica em zero. E o estado que o criterio precisa distinguir de "nao
+        tem nada"."""
+        obs = self._gov(**{
+            "infra/grafana/provisioning/datasources/datasources.yml": "apiVersion: 1\n",
+            "docker-compose.yml": "services:\n  loki:\n    image: grafana/loki\n"})
+        self.assertEqual(obs["alertas"], 0)
+        self.assertIn("grafana", obs["stack"])
+        self.assertIn("loki", obs["stack"])
+
+    def test_repo_sem_observabilidade_e_zero_medido_nao_nulo(self):
+        """Contrato da casa: `0`/`[]` dizem "varri e nao achei"; `None` diria
+        "nao consegui varrer". Aqui a varredura ACONTECEU."""
+        obs = self._gov(**{"app.py": "x = 1\n", "README.md": "# projeto\n"})
+        self.assertEqual(obs["alertas"], 0)
+        self.assertEqual(obs["stack"], [])
+        self.assertIs(obs["truncado"], False)
+        self.assertNotIn("observabilidade", self._nao_medido_de(obs))
+
+    @staticmethod
+    def _nao_medido_de(obs):
+        return obs.get("nao_medido", {}) if isinstance(obs, dict) else {}
+
+    def test_diretorio_pesado_nao_e_varrido(self):
+        """`node_modules` e `.git` ficam de fora: repo grande nao pode fazer
+        a coleta andar de joelhos, e pacote de terceiro nao e observabilidade
+        DO PROJETO."""
+        obs = self._gov(**{
+            "node_modules/algum-pacote/prometheus.yml": REGRA_PROMETHEUS,
+            "venv/lib/grafana/alertas.yml": REGRA_PROMETHEUS,
+            "app.py": "x = 1\n"})
+        self.assertEqual(obs["alertas"], 0)
+        self.assertEqual(obs["stack"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1245,5 +1245,80 @@ class TestMttrSemFalhaExplicaOTraco(unittest.TestCase):
         self.assertNotIn("nenhum deploy falhou", rot)
 
 
+class TestObservabilidadeExigivelSoQuemEntrega(unittest.TestCase):
+    """Os 5 estados do criterio "infraestrutura observavel" (2026-08-21).
+
+    Antes: `tem_alerta = bool(containers) or bool(db)` — a variavel prometia
+    alerta e olhava container do HOST, e `tem_alerta or None` fazia o
+    criterio NUNCA reprovar. Quem nao tinha observabilidade nenhuma saia do
+    denominador em vez de perder ponto.
+
+    Decisao do dono (2026-08-21): reprova, mas so de quem ENTREGA. Se o DORA
+    identificou workflow de deploy, o projeto sobe pra algum lugar e precisa
+    saber quando aquilo quebra. Biblioteca que nao deploya nao tem o que
+    observar — "nada a auditar", como no fim dos 5 pontos de graca.
+    """
+
+    @staticmethod
+    def _snap_obs(alertas=0, stack=(), com_deploy=True, dora=True):
+        extra = {"governance": {
+            "segredos_commitados": [],
+            "workflows": {"count": 1, "sem_pin": [], "sem_permissions": []},
+            "dependencias": {},
+            "observabilidade": {"alertas": alertas, "stack": list(stack),
+                                "arquivos_de_regra": [], "truncado": False},
+        }}
+        if dora:
+            extra["dora"] = {"workflows_de_deploy": ["CI/CD"] if com_deploy else [],
+                             "deploys_analisados": 5 if com_deploy else 0}
+        return _snap(**extra)
+
+    def test_alerta_declarado_passa(self):
+        rot, ok = _criterio(self._snap_obs(alertas=45, stack=["prometheus"]),
+                            "Confiabilidade", "infraestrutura observável")
+        self.assertIs(ok, True)
+        self.assertIn("45", rot)
+
+    def test_coleta_sem_alerta_reprova(self):
+        """O estado mais traicoeiro: tem Grafana bonito e ninguem e avisado.
+        Antes isso passava (havia container); agora reprova com o motivo."""
+        rot, ok = _criterio(self._snap_obs(alertas=0, stack=["grafana", "loki"]),
+                            "Confiabilidade", "infraestrutura observável")
+        self.assertIs(ok, False)
+        self.assertIn("nenhum alerta", rot)
+
+    def test_nada_declarado_com_deploy_reprova(self):
+        rot, ok = _criterio(self._snap_obs(alertas=0, stack=[], com_deploy=True),
+                            "Confiabilidade", "infraestrutura observável")
+        self.assertIs(ok, False)
+
+    def test_nada_declarado_sem_deploy_e_nada_a_auditar(self):
+        """Biblioteca/CLI: nao entrega em lugar nenhum, nao ha o que observar.
+        Fora do denominador — nem premia nem pune."""
+        rot, ok = _criterio(self._snap_obs(alertas=0, stack=[], com_deploy=False),
+                            "Confiabilidade", "infraestrutura observável")
+        self.assertIsNone(ok)
+        self.assertIn("nada a auditar", rot)
+
+    def test_sem_o_coletor_dora_nao_afirma_nada(self):
+        """Sem `gh` o DORA nao roda, e ai nao da pra saber se o projeto
+        entrega. Nao afirmar > afirmar errado: cai em nao-auditado, nunca em
+        reprovacao."""
+        rot, ok = _criterio(self._snap_obs(alertas=0, stack=[], dora=False),
+                            "Confiabilidade", "infraestrutura observável")
+        self.assertIsNone(ok)
+
+    def test_snapshot_velho_sem_observabilidade_nao_reprova_por_ausencia(self):
+        """Guard de compatibilidade: snapshot anterior a este fix nao tem o
+        campo. Ausencia de dado nao pode virar acusacao."""
+        snap = _snap(governance={"segredos_commitados": [],
+                                 "workflows": {"count": 1, "sem_pin": [],
+                                               "sem_permissions": []},
+                                 "dependencias": {}},
+                     dora={"workflows_de_deploy": ["CI/CD"]})
+        rot, ok = _criterio(snap, "Confiabilidade", "infraestrutura observável")
+        self.assertIsNone(ok)
+
+
 if __name__ == "__main__":
     unittest.main()

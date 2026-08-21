@@ -191,11 +191,53 @@ Source: Google SRE for the operational items.
 | CI green | 3 | success rate ≥ 85 % | no GitHub Actions data |
 | Operational runbook | 3 | `docs/runbooks/`, `runbooks/` or `docs/deploy/runbooks/` contains any `.md` | the `governance` collector raised — see the Process axis |
 | Migrations applied | 2 | no pending migration | `showmigrations` failed, the project has no `manage.py`, or the toml's `manage_py` does not resolve inside the root |
-| Observable infrastructure | 2 | container or database metrics were collected | nothing was collected — this criterion never fails, it only counts when present |
+| Observable infrastructure | 2 | the repository declares at least one alerting rule | the `governance` collector raised, or nothing is declared and no deploy workflow was identified |
 
 Below 85 % green, a team learns to ignore red. That is the reason the threshold
 is where it is: an unstable pipeline is worse than no pipeline, because it
 trains people to merge past it.
+
+### Observable infrastructure — read from the repository
+
+Until 2026-08-21 this criterion asked the host: any running container, or any
+answer from the database collector, and the project counted as observable. That
+measured the auditor's laptop, not the project — a repository with 45 versioned
+alerting rules scored the same as one with none, and a repository with nothing
+passed as long as some container happened to be up. It also could never fail,
+only abstain.
+
+It now reads the repository, where alerting rules and stack configuration
+actually live:
+
+- **stack** — `prometheus`, `alertmanager`, `grafana`, `loki`, `promtail`,
+  `otel`, `datadog`, `newrelic`, matched in file and directory names, plus the
+  service images declared inside `docker-compose*` files;
+- **alerting rules** — lines matching `alert:` as a YAML key in any `.yml` /
+  `.yaml` outside `.github/` (a workflow step is not an alerting rule);
+- **runbooks** — reused from the Process axis.
+
+Heavy directories (`node_modules`, `venv`, `.git`, `dist`, `vendor`, …) are
+skipped, and the walk stops at 20 000 files, reporting `truncado: true` rather
+than trimming in silence.
+
+| Repository state | Result |
+|---|---|
+| at least one alerting rule declared | met |
+| collection stack present, zero alerting rules | **not met** — it gathers metrics and warns nobody |
+| nothing declared, but a deploy workflow exists | **not met** |
+| nothing declared and no deploy workflow | nothing to audit — out of the denominator |
+| the `dora` collector did not run | not audited — without it there is no way to know whether the project ships |
+
+**Only projects that ship are held to this.** If DORA identified a deploy
+workflow, the project reaches an environment and needs a way to learn that it
+broke. A library that deploys nowhere has nothing to observe, and is treated the
+same way as a repository with no workflows in the Security axis: out of the
+denominator, neither rewarded nor punished.
+
+**The limit, stated plainly: this measures declaration, not operation.** A
+versioned `slos.yml` does not prove Prometheus is running, an alert firing, or
+anyone reading it. That is the nature of auditing a repository — and it is still
+far closer to the truth than asking the host whether any container is up.
 
 **On cancelled runs:** the rate is, and stays, successes over *concluded* runs
 (`success + failure`) — cancelling is not the same as failing, and is often a

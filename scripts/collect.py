@@ -1685,6 +1685,99 @@ def _deps_desatualizadas(root, cfg):
     return out
 
 
+# Observabilidade e um SINAL DE REPOSITORIO — nao do host onde a auditoria
+# roda. O criterio antigo media `docker stats`: qualquer container de pe valia
+# "infraestrutura observavel", entao um projeto com 45 alertas versionados
+# tirava a mesma nota de um com zero, e um projeto sem nada passava se houvesse
+# um Postgres rodando na maquina de quem auditou. Regra de alerta e config de
+# stack sao ARQUIVOS; ler arquivo funciona em qualquer projeto, inclusive onde
+# nao ha acesso ao Docker do host.
+
+DIRS_FORA_DA_VARREDURA = {
+    ".git", "node_modules", "venv", ".venv", "__pycache__", ".ruff_cache",
+    ".mypy_cache", ".pytest_cache", "dist", "build", ".tox", "site-packages",
+    "vendor", ".next", ".nuxt", "target",
+}
+
+# (rotulo, marcas que aparecem em nome de arquivo ou de diretorio)
+MARCAS_DE_STACK = (
+    ("prometheus", ("prometheus",)),
+    ("alertmanager", ("alertmanager",)),
+    ("grafana", ("grafana",)),
+    ("loki", ("loki",)),
+    ("promtail", ("promtail",)),
+    ("otel", ("otel-collector", "otelcol", "opentelemetry")),
+    ("datadog", ("datadog",)),
+    ("newrelic", ("newrelic", "new-relic")),
+)
+
+# Teto de arquivos examinados. Repo gigante nao pode fazer a coleta andar de
+# joelhos — e o que ficou de fora vai pro snapshot (`truncado`), porque corte
+# silencioso le como "varri tudo".
+LIMITE_ARQUIVOS_VARRIDOS = 20000
+
+# `alert:` como CHAVE de regra Prometheus. Ancorado no inicio da linha (com ou
+# sem o hifen da lista) pra nao casar a palavra solta no meio de um texto.
+RE_REGRA_DE_ALERTA = re.compile(r"^\s*-?\s*alert:\s*\S", re.M)
+
+
+def _observabilidade_declarada(root):
+    """O que o REPOSITORIO diz sobre como se descobre que ele quebrou.
+
+    Mede DECLARACAO, nao funcionamento: um `slos.yml` versionado nao prova
+    Prometheus de pe. E a mesma natureza do resto da skill (auditar
+    repositorio) e continua muito mais perto da verdade do que perguntar ao
+    Docker do host se ha algum container ligado.
+    """
+    root = Path(root)
+    stack, arquivos, alertas, vistos, truncado = set(), [], 0, 0, False
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in DIRS_FORA_DA_VARREDURA]
+        rel_dir = Path(dirpath).relative_to(root).as_posix().lower()
+        for rotulo, marcas in MARCAS_DE_STACK:
+            if any(m in rel_dir for m in marcas):
+                stack.add(rotulo)
+        for nome in filenames:
+            vistos += 1
+            if vistos > LIMITE_ARQUIVOS_VARRIDOS:
+                truncado = True
+                break
+            baixo = nome.lower()
+            for rotulo, marcas in MARCAS_DE_STACK:
+                if any(m in baixo for m in marcas):
+                    stack.add(rotulo)
+            if not baixo.endswith((".yml", ".yaml")):
+                continue
+            compose = baixo.startswith("docker-compose") or baixo == "compose.yml"
+            rel = (Path(dirpath) / nome).relative_to(root).as_posix()
+            # Workflow do GitHub nao define regra de alerta — e o falso
+            # positivo mais provavel (um step chamado "alert").
+            if rel.startswith(".github/"):
+                continue
+            try:
+                texto = (Path(dirpath) / nome).read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            # No compose a stack aparece no CONTEUDO (`image: grafana/loki`),
+            # nao no nome do arquivo. Restrito ao compose de proposito: varrer
+            # o texto de qualquer yml transformaria uma mencao solta em
+            # "tem Grafana".
+            if compose:
+                for rotulo, marcas in MARCAS_DE_STACK:
+                    if any(m in texto.lower() for m in marcas):
+                        stack.add(rotulo)
+            achados = len(RE_REGRA_DE_ALERTA.findall(texto))
+            if achados:
+                alertas += achados
+                arquivos.append(rel)
+        if truncado:
+            break
+
+    return {"stack": sorted(stack), "alertas": alertas,
+            "arquivos_de_regra": sorted(arquivos)[:20], "truncado": truncado}
+
+
 def collect_governance(root, cfg):
     """Governanca: docs, protecao de branch, supply chain, segredo commitado.
 
@@ -1726,6 +1819,7 @@ def collect_governance(root, cfg):
         "branch_protection": _branch_protection(root),
         "segredos_commitados": _varre_segredos(root),
         "dependencias": _deps_desatualizadas(root, cfg),
+        "observabilidade": _observabilidade_declarada(root),
     }
     if resultado["segredos_commitados"] is None:
         nao_medido(resultado, "segredos_commitados",
