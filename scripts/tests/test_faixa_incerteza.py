@@ -199,7 +199,12 @@ class TestPlanoDeAcao(unittest.TestCase):
         snap["governance"]["observabilidade"] = {"alertas": 0, "stack": [], "arquivos": 0}
         snap["dora"] = {"workflows_de_deploy": []}
         achados = render.auditoria(snap)[1]
-        self.assertFalse([a for a in achados if "limitação do ambiente" in a[2]])
+        # Observabilidade é None (nada a auditar) em Confiabilidade e não deve gerar achado.
+        # Outros eixos legitimamente produzem NAO_MEDIDO (dora presente mas sem campos,
+        # quality/git ausentes, etc.), então a verificação é scoped apenas a Confiabilidade.
+        self.assertFalse([a for a in achados
+                          if a[1] == "Confiabilidade"
+                          and "limitação do ambiente" in a[2]])
 
 
 if __name__ == "__main__":

@@ -534,11 +534,10 @@ def auditoria(snap):
         total = sum(i[0] for i in itens if i[1] is not None)
         ganhos = sum(i[0] for i in itens if i[1] is True)
         incerto = sum(i[0] for i in itens if i[1] is NAO_MEDIDO)
-        tem_aprovado = ganhos > 0
         for peso, ok, rotulo, prio, txt, acao in itens:
             if ok is False:
                 achados.append((prio, nome, txt, acao))
-            elif ok is NAO_MEDIDO and tem_aprovado:
+            elif ok is NAO_MEDIDO:
                 # Sem esta linha o buraco de medicao fica invisivel — que e
                 # como a FU passou despercebida por 6 dias.
                 achados.append((
