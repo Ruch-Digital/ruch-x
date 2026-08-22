@@ -53,7 +53,6 @@ def _snap_confiabilidade(migrations):
 
 class TestFaixaNoCalculo(unittest.TestCase):
 
-    @unittest.expectedFailure  # a classificacao chega na Task 2, que REMOVE este decorator
     def test_caso_da_fu_migrations_timeout_vira_faixa_e_nao_100(self):
         """O caso real de 21/08: timeout nas migrations NAO pode dar A/100."""
         x = _confiabilidade(_snap_confiabilidade("timeout"))
@@ -102,6 +101,86 @@ class TestFaixaNoCalculo(unittest.TestCase):
         """Zero criterios com medicao: letra NA de hoje nao muda."""
         eixos = {x["nome"]: x for x in render.auditoria(_snap())[0]}
         self.assertEqual(eixos["Entrega"]["letra"], "NA")
+
+
+class TestClassificacaoDosCriterios(unittest.TestCase):
+    """Ambiente → NAO_MEDIDO; semantico → None. Um exemplo por familia."""
+
+    def _criterio(self, snap, eixo, prefixo):
+        eixos = {x["nome"]: x for x in render.auditoria(snap)[0]}
+        return next(ok for rot, ok in eixos[eixo]["checados"] if rot.startswith(prefixo))
+
+    def test_segredos_com_coletor_caido_e_nao_medido(self):
+        snap = _snap(governance={"segredos_commitados": None,
+                                 "nao_medido": {"segredos_commitados": "git falhou"},
+                                 "workflows": {}, "dependencias": {}, "dependabot": False})
+        self.assertIs(self._criterio(snap, "Segurança", "nenhum segredo"), render.NAO_MEDIDO)
+
+    def test_governance_inteiro_caido_e_nao_medido_em_processo(self):
+        snap = _snap(errors={"governance": "boom"})
+        self.assertIs(self._criterio(snap, "Processo", "README"), render.NAO_MEDIDO)
+
+    def test_sem_workflow_nenhum_segue_nada_a_auditar(self):
+        """Decisao de 2026-08-20 nao regride: zero workflows = None, sem faixa."""
+        snap = _snap(governance={"segredos_commitados": [], "dependencias": {},
+                                 "workflows": {"count": 0, "sem_pin": [],
+                                               "sem_permissions": [], "permissions_no_job": []}})
+        self.assertIsNone(self._criterio(snap, "Segurança", "actions com versão"))
+
+    def test_licenca_em_repo_privado_segue_nada_a_auditar(self):
+        snap = _snap(governance={
+            "docs": {"readme": "README.md", "licenca": None, "adr": None,
+                     "docs_dir": None, "runbooks": None, "changelog": None},
+            "branch_protection": {"disponivel": True, "branch": "main",
+                                  "visibility": "PRIVATE"},
+            "segredos_commitados": [], "workflows": {}, "dependencias": {}})
+        self.assertIsNone(self._criterio(snap, "Processo", "licença"))
+
+    def test_branch_protection_sem_gh_e_nao_medido(self):
+        snap = _snap(governance={
+            "docs": {"readme": "README.md", "licenca": None, "adr": None,
+                     "docs_dir": None, "runbooks": None, "changelog": None},
+            "branch_protection": {"disponivel": False, "motivo": "gh não instalado"},
+            "segredos_commitados": [], "workflows": {}, "dependencias": {}})
+        self.assertIs(self._criterio(snap, "Processo", "branch de produção"), render.NAO_MEDIDO)
+
+    def test_avisos_de_framework_em_settings_de_dev_e_nao_medido(self):
+        snap = _snap(django={"deploy_issues": [], "ambiente_de_producao": False,
+                             "pending_migrations": []})
+        self.assertIs(self._criterio(snap, "Segurança", "avisos de segurança"), render.NAO_MEDIDO)
+
+    def test_cobertura_ausente_continua_reprovando(self):
+        """Nao medir cobertura e escolha do projeto, nao do ambiente."""
+        self.assertIs(self._criterio(_snap(), "Qualidade", "cobertura"), False)
+
+    def test_dora_mttr_sem_falha_na_janela_segue_nada_a_auditar(self):
+        snap = _snap(dora={"deploys_por_semana": 10.0, "lead_time_p50_h": 1.0,
+                           "change_failure_rate": 0.0, "mttr_h": None,
+                           "deploys_analisados": 40, "workflows_de_deploy": ["deploy"]})
+        self.assertIsNone(self._criterio(snap, "Entrega", "tempo de recuperação"))
+        x = {e["nome"]: e for e in render.auditoria(snap)[0]}["Entrega"]
+        self.assertEqual(x["pct"], x["pct_max"], "mttr sem falha abriu faixa")
+
+    def test_dora_mttr_com_falha_aberta_e_nao_medido(self):
+        """Falha sem deploy verde depois: nao e boa noticia — entra na faixa
+        (a ponta pessimista conta a recuperacao pendente como reprovada)."""
+        snap = _snap(dora={"deploys_por_semana": 10.0, "lead_time_p50_h": 1.0,
+                           "change_failure_rate": 5.0, "mttr_h": None,
+                           "deploys_analisados": 40, "workflows_de_deploy": ["deploy"]})
+        self.assertIs(self._criterio(snap, "Entrega", "tempo de recuperação"), render.NAO_MEDIDO)
+
+    def test_dora_ausente_inteiro_e_nao_medido(self):
+        snap = _snap(errors={"dora": "gh não instalado"})
+        self.assertIs(self._criterio(snap, "Entrega", "frequência de deploy"), render.NAO_MEDIDO)
+
+    def test_hotspot_sem_radon_e_nao_medido(self):
+        snap = _snap(git={"hotspots": [{"file": "a.py", "churn": 9, "complexity": 40,
+                                        "loc": 100, "metodo": "heuristica"}]})
+        self.assertIs(self._criterio(snap, "Qualidade", "arquivo de maior atrito"), render.NAO_MEDIDO)
+
+    def test_observabilidade_com_coletor_fora_e_nao_medido(self):
+        snap = _snap(errors={"governance": "boom"})
+        self.assertIs(self._criterio(snap, "Confiabilidade", "infraestrutura"), render.NAO_MEDIDO)
 
 
 if __name__ == "__main__":

@@ -59,18 +59,22 @@ class TestSnapshotHostil(unittest.TestCase):
         self.assertEqual(len(snaps), 1)
         self.assertEqual(snaps[0]["project"], "alvo")
 
-    def test_criterio_nao_medido_sai_do_denominador(self):
-        """Nao medir nao pode nem premiar nem punir a nota."""
+    def test_criterio_nao_medido_por_ambiente_entra_na_faixa(self):
+        """Nao medir por AMBIENTE nao pode premiar — mas tambem nao pode
+        reprovar em definitivo: entra na faixa (spec 2026-08-22, FU-RUCHX-
+        NAO-AUDITADO-PREMIA). `pct` (pessimista) do snapshot nao-medido tem
+        que ser MENOR que o do medido-limpo; `pct_max` (otimista) tem que
+        ser MAIOR que o `pct` do mesmo snapshot nao-medido."""
         # "dependabot": False fixa 1 criterio como falha real nos dois lados.
         # Sem isso os dois snapshots batem 100% de qualquer jeito (tudo que
-        # sobra no denominador passa), e o assertNotEqual abaixo nunca
+        # sobra no denominador passa), e o assertLess abaixo nunca
         # conseguiria provar nada — verificado rodando o fixture original do
         # brief antes desta troca: 100 contra 100 mesmo com o fix aplicado,
         # porque excluir um item 100%-limpo do denominador nao move a razao
         # quando so sobram itens que tambem passam. Com uma falha real
-        # presente nos dois, excluir segredos_commitados do denominador MUDA
-        # a fracao (a falha pesa proporcionalmente mais), e da pra provar que
-        # o item nao medido saiu do calculo sem alegar credito.
+        # presente nos dois, contar segredos_commitados na ponta pessimista
+        # MUDA a fracao (a falha pesa proporcionalmente mais), e da pra
+        # provar que o item nao medido nao saiu de graca do calculo.
         medido = _snap(governance={"segredos_commitados": [], "workflows": {},
                                    "dependencias": {}, "dependabot": False})
         nao = _snap(governance={"segredos_commitados": None,
@@ -79,7 +83,10 @@ class TestSnapshotHostil(unittest.TestCase):
                                 "dependabot": False})
         eixos_m = {x["nome"]: x for x in render.auditoria(medido)[0]}
         eixos_n = {x["nome"]: x for x in render.auditoria(nao)[0]}
-        self.assertNotEqual(eixos_m["Segurança"]["pct"], eixos_n["Segurança"]["pct"])
+        self.assertLess(eixos_n["Segurança"]["pct"], eixos_m["Segurança"]["pct"],
+                        "pessimista: nao-medido nao pode empatar com medido-limpo")
+        self.assertGreater(eixos_n["Segurança"]["pct_max"], eixos_n["Segurança"]["pct"],
+                           "otimista tem que abrir faixa acima do pessimista")
         rotulos = " ".join(r for r, _ in eixos_n["Segurança"]["checados"])
         self.assertIn("não auditado", rotulos)
 
@@ -100,7 +107,7 @@ class TestContratoAchadoParqueado(unittest.TestCase):
         # ia contribuir pontos "limpos" do denominador nao move a razao
         # quando o resto ja passa 100%), e o assertNotEqual do item (2) nunca
         # provaria nada. Ver comentario identico em
-        # test_criterio_nao_medido_sai_do_denominador.
+        # test_criterio_nao_medido_por_ambiente_entra_na_faixa.
         nao_medido = _snap(governance={
             "segredos_commitados": None,
             "nao_medido": {"segredos_commitados": "git ls-files falhou"},
@@ -137,8 +144,9 @@ class TestContratoAchadoParqueado(unittest.TestCase):
         checklist = eixos_nao_medido["Segurança"]["checados"]
         item_segredo = next(rot for rot, ok in checklist if "segredo" in rot)
         ok_segredo = next(ok for rot, ok in checklist if "segredo" in rot)
-        self.assertIsNone(ok_segredo, "segredos_commitados nao medido tem que "
-                                       "sair como ok=None (nem sim, nem nao)")
+        self.assertIs(ok_segredo, render.NAO_MEDIDO,
+                      "segredos_commitados nao medido por ambiente tem que "
+                      "sair como NAO_MEDIDO — nem sim, nem nao")
         # o card do eixo no HTML usa class="na" pro item nao auditado —
         # nunca class="sim" (que so aparece quando ok is True de verdade).
         self.assertIn(f'class="na">{render.e(item_segredo)}', html_nao_medido)
@@ -171,8 +179,8 @@ class TestSiblingWorkflowsNaoMedido(unittest.TestCase):
         checklist = eixos["Segurança"]["checados"]
         ok_pin = self._por_prefixo(checklist, "actions com versão fixada")
         ok_perm = self._por_prefixo(checklist, "workflows com permissions declarado")
-        self.assertIsNone(ok_pin, "sem coletor rodado, pin nao pode sair True")
-        self.assertIsNone(ok_perm, "sem coletor rodado, permissions nao pode sair True")
+        self.assertIs(ok_pin, render.NAO_MEDIDO, "sem coletor rodado, pin nao pode sair True")
+        self.assertIs(ok_perm, render.NAO_MEDIDO, "sem coletor rodado, permissions nao pode sair True")
         # O motivo tem que chegar JUNTO do criterio, no card do eixo — nao so
         # na lista de achados no fim da pagina.
         rotulos = " ".join(r for r, _ in checklist)
@@ -253,10 +261,10 @@ class TestGovernanceAusenteNaoReprova(unittest.TestCase):
         eixos = {x["nome"]: x for x in render.auditoria(sem_governance)[0]}
         processo = eixos["Processo"]["checados"]
         for prefixo in ("README", "decisões documentadas", "licença"):
-            self.assertIsNone(self._por_prefixo(processo, prefixo),
-                              f"'{prefixo}' nao pode reprovar sem o coletor ter rodado")
-        self.assertIsNone(
-            self._por_prefixo(eixos["Confiabilidade"]["checados"], "runbook"),
+            self.assertIs(self._por_prefixo(processo, prefixo), render.NAO_MEDIDO,
+                          f"'{prefixo}' nao pode reprovar sem o coletor ter rodado")
+        self.assertIs(
+            self._por_prefixo(eixos["Confiabilidade"]["checados"], "runbook"), render.NAO_MEDIDO,
             "runbook nao pode reprovar sem o coletor ter rodado")
 
         # Nenhum criterio do eixo foi medido -> nao ha letra. "F" aqui seria
@@ -702,7 +710,7 @@ class TestCritical1NenhumNoneNaTela(unittest.TestCase):
         """Coletor que levanta excecao nao deixa a propria chave no snapshot,
         so uma entrada em `errors` — o criterio saia "nao auditado" pelado."""
         rot, ok = _criterio(self._coletores_caidos(), "Confiabilidade", "CI verde")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
         self.assertIn("não auditado", rot)
         self.assertIn("gh cli nao encontrado", rot)
 
@@ -749,7 +757,7 @@ class TestCritical2DependenciaNodeEntraNaNota(unittest.TestCase):
                              "nao_medido": {"total": "package.json ilegível"}},
         })
         rot, ok = _criterio(snap, "Segurança", "dependências atualizadas")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
         self.assertIn("package.json ilegível", rot)
         self.assertNotIn("None", rot)
 
@@ -792,24 +800,24 @@ class TestCritical3MetodoDaComplexidade(unittest.TestCase):
         ambiente do auditor, nao do codigo auditado."""
         rot, ok = _criterio(self._com_hotspot(120, "heuristica"), "Qualidade",
                             "arquivo de maior atrito")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
         self.assertIn("complexidade estimada sem radon", rot)
 
     def test_heuristica_alta_tambem_sai_do_denominador(self):
-        """Nem pra reprovar. A heuristica nao tem escala absoluta em nenhuma
-        das duas direcoes — e nao medir nao pode punir, do mesmo jeito que
-        nao pode premiar."""
+        """Nem pra reprovar de verdade — mas entra na FAIXA (2026-08-22): a
+        heuristica nao tem escala absoluta em nenhuma das duas direcoes, e a
+        causa e o AMBIENTE (radon ausente), nao "nada a auditar"."""
         _, ok = _criterio(self._com_hotspot(400, "heuristica"), "Qualidade",
                           "arquivo de maior atrito")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
 
     def test_snapshot_antigo_sem_metodo_nao_e_julgado(self):
         """Snapshot anterior ao campo `metodo` (Task 4) tem procedencia
         desconhecida: pode ser radon, pode ser heuristica. Nao se julga o
-        que nao se sabe de onde veio."""
+        que nao se sabe de onde veio — ambiente, entra na faixa."""
         rot, ok = _criterio(self._com_hotspot(180), "Qualidade",
                             "arquivo de maior atrito")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
         self.assertIn("não registrado", rot)
 
 
@@ -868,7 +876,7 @@ class TestMinor6RotuloDoDjango(unittest.TestCase):
             "nao_medido": {"deploy_issues": "projeto sem manage.py na raiz"},
         })
         rot, ok = _criterio(snap, "Segurança", "avisos de segurança do framework")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
         self.assertIn("projeto sem manage.py", rot)
         self.assertNotIn("settings de dev", rot)
 
@@ -877,7 +885,7 @@ class TestMinor6RotuloDoDjango(unittest.TestCase):
         snap = _snap(django={"pending_migrations": [], "deploy_issues": [],
                              "other_issues": [], "ambiente_de_producao": False})
         rot, ok = _criterio(snap, "Segurança", "avisos de segurança do framework")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
         self.assertIn("settings de dev", rot)
 
 
@@ -947,7 +955,7 @@ class TestAjuste1LicencaPrivadaNaoDesconta(unittest.TestCase):
         pode empilhar 'nao auditado: ...' junto com 'visibilidade nao apurada'."""
         rot, ok = _criterio(self._snap_licenca(None, governance_ok=False),
                             "Processo", "licença")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
         self.assertIn("não auditado", rot)
         self.assertNotIn("visibilidade do repositório não apurada", rot)
 
@@ -983,14 +991,14 @@ class TestAjuste2PreCommitEChangelogReprovam(unittest.TestCase):
         self.assertIs(ok, True)
 
     def test_coletor_governance_caido_continua_nao_auditado(self):
-        """Guard contra sobrecorrecao: o UNICO jeito de sair None e o coletor
-        `governance` inteiro nao ter rodado — esse caminho ja tinha teste
-        (`TestGovernanceAusenteNaoReprova`) e nao pode quebrar."""
+        """Guard contra sobrecorrecao: o UNICO jeito de sair NAO_MEDIDO e o
+        coletor `governance` inteiro nao ter rodado — esse caminho ja tinha
+        teste (`TestGovernanceAusenteNaoReprova`) e nao pode quebrar."""
         sem_governance = _snap(errors={"governance": "boom: falha inesperada"})
         _, ok_pre = _criterio(sem_governance, "Processo", "hooks de pre-commit")
         _, ok_change = _criterio(sem_governance, "Processo", "histórico de mudanças")
-        self.assertIsNone(ok_pre)
-        self.assertIsNone(ok_change)
+        self.assertIs(ok_pre, render.NAO_MEDIDO)
+        self.assertIs(ok_change, render.NAO_MEDIDO)
 
     def test_nota_do_eixo_muda_quando_pre_commit_ausente(self):
         """Prova ponta a ponta: antes do fix, dois snapshots com pre_commit
@@ -1172,8 +1180,10 @@ class TestMttrSemFalhaExplicaOTraco(unittest.TestCase):
     O rotulo NAO pode ser ingenuo: `mttr_h` tambem fica `None` quando um
     deploy falhou e ainda NAO veio um verde depois dele. Escrever "nenhum
     deploy falhou" ali seria o painel mentindo justamente no caso ruim.
-    Nos dois casos o criterio segue `None` (nem premia nem pune) — o que
-    muda e so a explicacao.
+    O `ok` dos dois casos diverge desde a faixa de incerteza (2026-08-22):
+    "nenhum deploy falhou" segue `None` (nada a auditar, nem premia nem
+    pune) — mas "falha sem deploy verde depois" vira `NAO_MEDIDO` (entra na
+    faixa pessimista: a recuperacao pendente conta contra, ate ser apurada).
     """
 
     def test_sem_falha_na_janela_o_traco_ganha_motivo(self):
@@ -1193,7 +1203,7 @@ class TestMttrSemFalhaExplicaOTraco(unittest.TestCase):
                            "change_failure_rate": 50.0, "mttr_h": None,
                            "deploys_analisados": 4})
         rot, ok = _criterio(snap, "Entrega", "tempo de recuperação")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO, "falha pendente e ambiente que precisa medir — entra na faixa")
         self.assertNotIn("nenhum deploy falhou", rot)
         self.assertIn("sem deploy verde depois", rot)
 
@@ -1214,7 +1224,7 @@ class TestMttrSemFalhaExplicaOTraco(unittest.TestCase):
         afirmacoes diferentes ("nao medi" != "medi e nao houve")."""
         snap = _snap(errors={"dora": "gh cli nao encontrado"})
         rot, ok = _criterio(snap, "Entrega", "tempo de recuperação")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
         self.assertIn("não auditado", rot)
         self.assertNotIn("nenhum deploy falhou", rot)
 
@@ -1241,7 +1251,8 @@ class TestMttrSemFalhaExplicaOTraco(unittest.TestCase):
         snap = _snap(dora={"deploys_por_semana": 5, "lead_time_p50_h": 2,
                            "change_failure_rate": 0.0, "mttr_h": None})
         rot, ok = _criterio(snap, "Entrega", "tempo de recuperação")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO,
+                      "sem deploys_analisados nao da pra afirmar 'nada a auditar' — entra na faixa")
         self.assertNotIn("nenhum deploy falhou", rot)
 
 
@@ -1306,7 +1317,7 @@ class TestObservabilidadeExigivelSoQuemEntrega(unittest.TestCase):
         reprovacao."""
         rot, ok = _criterio(self._snap_obs(alertas=0, stack=[], dora=False),
                             "Confiabilidade", "infraestrutura observável")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
 
     def test_snapshot_velho_sem_observabilidade_nao_reprova_por_ausencia(self):
         """Guard de compatibilidade: snapshot anterior a este fix nao tem o
@@ -1317,7 +1328,7 @@ class TestObservabilidadeExigivelSoQuemEntrega(unittest.TestCase):
                                  "dependencias": {}},
                      dora={"workflows_de_deploy": ["CI/CD"]})
         rot, ok = _criterio(snap, "Confiabilidade", "infraestrutura observável")
-        self.assertIsNone(ok)
+        self.assertIs(ok, render.NAO_MEDIDO)
 
 
 if __name__ == "__main__":

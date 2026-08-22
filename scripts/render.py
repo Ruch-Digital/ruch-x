@@ -395,8 +395,9 @@ def _observabilidade(snap, gov):
     obs = _seguro(gov.get("observabilidade"), dict)
     if obs is None:
         # Snapshot anterior ao campo, ou coletor fora do ar. Ausencia de dado
-        # nao vira acusacao.
-        return None, _nao_auditado(snap, "governance")
+        # nao vira acusacao — mas e o AMBIENTE que impediu a medicao, entao
+        # entra na faixa (NAO_MEDIDO), nunca "nada a auditar".
+        return NAO_MEDIDO, _nao_auditado(snap, "governance")
 
     alertas = _seguro(obs.get("alertas"), int) or 0
     stack = _seguro(obs.get("stack"), list) or []
@@ -410,8 +411,9 @@ def _observabilidade(snap, gov):
     wf_deploy = _seguro(dig(snap, "dora", "workflows_de_deploy"), list)
     if wf_deploy is None:
         # Sem o coletor `dora` nao da pra saber se o projeto entrega. Nao
-        # afirmar vale mais que afirmar errado.
-        return None, _nao_auditado(snap, "dora")
+        # afirmar vale mais que afirmar errado — e o ambiente que faltou,
+        # entao entra na faixa.
+        return NAO_MEDIDO, _nao_auditado(snap, "dora")
     if not wf_deploy:
         return None, " (nenhum deploy identificado — nada a auditar)"
     return False, " (nada declarado no repositório)"
@@ -437,8 +439,10 @@ def _motivo_do_mttr_vazio(snap, cfr):
 
 
 def _sim_nao(ok, sim="sim", nao="não", na="não auditado"):
-    """Tres estados no resumo do eixo. `None` NAO e "não"."""
-    return na if ok is None else (sim if ok else nao)
+    """Tres estados no resumo do eixo. `None`/`NAO_MEDIDO` NAO sao "não" —
+    e nenhum dos dois tem truthiness (a sentinela estoura de proposito), por
+    isso a comparacao explicita em vez de `if ok:`."""
+    return na if ok is None or ok is NAO_MEDIDO else (sim if ok is True else nao)
 
 
 # --------------------------------------------------------------------------
@@ -565,26 +569,35 @@ def auditoria(snap):
     # Rotulo e resumo passam por `_valor`: sem medicao o numero vira travessao,
     # nunca a string "None". O texto do achado pode interpolar cru — ele so e
     # exibido quando `ok is False`, o que exige o valor existir.
+    # `deploys_analisados` decide o 3o estado do mttr (ver comentario no item
+    # abaixo): falta desse dado e ambiente, entao NAO_MEDIDO — nunca "nada a
+    # auditar" de graca so porque o snapshot e anterior ao campo.
+    analisados_mttr = _seguro(dig(snap, "dora", "deploys_analisados"), int)
+    mttr_ok = (None if mttr is None and cfr == 0 and analisados_mttr
+               else NAO_MEDIDO if mttr is None
+               else n_mttr in bom)
     eixo("Entrega", [
-        (3, None if freq is None else n_freq in bom,
+        (3, NAO_MEDIDO if freq is None else n_freq in bom,
          f"frequência de deploy ({_valor(freq, '/semana')})"
          + (_nao_auditado(snap, "dora", "deploys_por_semana") if freq is None else ""), "P2",
          f"Deploy {freq}/semana — abaixo do patamar de time de alta performance (1+/semana).",
          "Encurtar o ciclo: integrar na main com mais frequência e automatizar o caminho até produção."),
-        (3, None if lead is None else n_lead in bom,
+        (3, NAO_MEDIDO if lead is None else n_lead in bom,
          f"lead time p50 ({_valor(lead, 'h')})"
          + (_nao_auditado(snap, "dora", "lead_time_p50_h") if lead is None else ""), "P1",
          f"Lead time de {lead}h entre commit e produção.",
          "Reduzir fila e etapas manuais entre merge e deploy."),
-        (3, None if cfr is None else n_cfr in bom,
+        (3, NAO_MEDIDO if cfr is None else n_cfr in bom,
          f"taxa de falha ({_valor(cfr, '%')})"
          + (_nao_auditado(snap, "dora", "change_failure_rate") if cfr is None else ""), "P1",
          f"{cfr}% das mudanças que chegam na branch de produção falham no pipeline.",
          "Gatear o merge com a suíte e rodar o teste do módulo tocado antes do push."),
         # Dois motivos diferentes produzem `mttr_h: None` — o coletor nao
         # ter medido, ou nao haver falha pra recuperar. `_nao_auditado` cobre
-        # o primeiro; `_motivo_do_mttr_vazio`, o segundo (ver o helper).
-        (2, None if mttr is None else n_mttr in bom,
+        # o primeiro; `_motivo_do_mttr_vazio`, o segundo (ver o helper). So o
+        # primeiro (e a falha sem deploy verde depois) entra na faixa — nao
+        # haver falha na janela e "nada a auditar" de verdade.
+        (2, mttr_ok,
          f"tempo de recuperação ({_valor(mttr, 'h')})"
          + ((_nao_auditado(snap, "dora", "mttr_h")
              or _motivo_do_mttr_vazio(snap, cfr)) if mttr is None else ""), "P1",
@@ -619,7 +632,7 @@ def auditoria(snap):
     # sai do denominador com o motivo na tela, que e a regra da casa.
     # `metodo` ausente e snapshot anterior ao campo (Task 4): procedencia
     # desconhecida vale o mesmo que heuristica — nao se julga o que nao se sabe.
-    hot_ok = hot0_cx < LIMIAR_HOTSPOT if hot0_metodo == "radon" else None
+    hot_ok = hot0_cx < LIMIAR_HOTSPOT if hot0_metodo == "radon" else NAO_MEDIDO
     if hot0 is None:
         hot_rotulo = _nao_auditado(snap, "git", "hotspots")
     elif hot0_metodo == "radon":
@@ -638,7 +651,7 @@ def auditoria(snap):
          "Cobertura de testes não é medida — não há como saber o que a suíte protege."
          if cov is None else f"Cobertura em {cov}%.",
          "Rodar a suíte com relatório de cobertura e versionar o resultado a cada coleta."),
-        (3, None if pct_cx is None else pct_cx < 5,
+        (3, NAO_MEDIDO if pct_cx is None else pct_cx < 5,
          f"complexidade ({_valor(cx)} funções acima de 10)"
          + (_nao_auditado(snap, "quality", "complexity") if pct_cx is None else ""), "P2",
          f"{cx} funções com complexidade acima de 10 ({pct_cx:.1f}% do total)." if pct_cx else "",
@@ -668,8 +681,8 @@ def auditoria(snap):
         f" (não auditado: {gov_erro or 'coletor governance não rodou'})")
 
     def _do_gov(valor):
-        """`None` (nao auditado) se o coletor nao rodou; senao `bool(valor)`."""
-        return None if gov_raw is None else bool(valor)
+        """NAO_MEDIDO (ambiente: coletor governance nao rodou) ou bool(valor)."""
+        return NAO_MEDIDO if gov_raw is None else bool(valor)
 
     # `seg` preserva o None de "nao medido" (`_seguro` com lista tambem cai
     # em None se o campo vier malformado — malformado converge com "nao
@@ -716,17 +729,21 @@ def auditoria(snap):
     # workflow e a mesma afirmacao vacua do criterio, uma linha acima.
     n_pin = len(sem_pin) if (wf_raw is not None and not wf_sem_nada) else None
     eixo("Segurança", [
-        (5, None if seg is None else len(seg) == 0,
+        (5, NAO_MEDIDO if seg is None else len(seg) == 0,
          "nenhum segredo commitado"
          + (_nao_medido(snap, "governance", "segredos_commitados") or gov_rotulo), "P0",
          f"{len(seg or [])} possível(is) segredo(s) em arquivo versionado: {_arquivos(seg)}.",
          "Revogar a credencial (o histórico do git guarda para sempre) e mover para variável de ambiente."),
-        (3, None if (wf_raw is None or wf_sem_nada) else len(sem_pin) == 0,
+        # `wf_raw is None` = coletor caiu (ambiente) -> NAO_MEDIDO. `wf_sem_nada`
+        # = coletor rodou e nao ha workflow nenhum pra proteger (nada a
+        # auditar) -> continua None. Os dois produziam o mesmo `ok=None` antes
+        # da faixa; agora tem que se distinguir.
+        (3, NAO_MEDIDO if wf_raw is None else None if wf_sem_nada else len(sem_pin) == 0,
          "actions com versão fixada" + gov_rotulo + rotulo_sem_wf, "P1",
          f"{len(sem_pin)} action(s) referenciada(s) por tag móvel "
          f"(ex: {sem_pin[0] if sem_pin else '—'}).",
          "Fixar no SHA do commit: tag pode ser reapontada e roda código novo dentro do seu CI, com seus secrets."),
-        (2, None if (wf_raw is None or wf_sem_nada) else len(sem_perm) == 0,
+        (2, NAO_MEDIDO if wf_raw is None else None if wf_sem_nada else len(sem_perm) == 0,
          "workflows com permissions declarado" + gov_rotulo + rotulo_sem_wf, "P2",
          f"{len(sem_perm)} workflow(s) sem bloco `permissions` no topo — herdam token amplo "
          f"nos jobs que não o declaram."
@@ -734,14 +751,14 @@ def auditoria(snap):
             f"mas isso não protege os demais jobs do mesmo workflow." if perm_no_job else ""),
          "Declarar `permissions:` com o mínimo necessário no topo do workflow — "
          "o bloco no job protege só aquele job."),
-        (2, None if pct_velhas is None else pct_velhas < 25,
+        (2, NAO_MEDIDO if pct_velhas is None else pct_velhas < 25,
          f"dependências atualizadas ({_valor(desatual)}/{_valor(total_deps)})"
          + ((_nao_medido(snap, "governance", "dependencias", "total")
              or _nao_medido(snap, "governance", "dependencias", "desatualizadas")
              or gov_rotulo) if pct_velhas is None else ""), "P2",
          f"{desatual} de {total_deps} dependências desatualizadas ({pct_velhas:.0f}%)." if pct_velhas else "",
          "Dependência velha é dívida com juros: quanto mais espera, mais caro e arriscado o upgrade."),
-        (2, gov.get("dependabot"), "atualização automática de dependências" + gov_rotulo, "P2",
+        (2, _do_gov(gov.get("dependabot")), "atualização automática de dependências" + gov_rotulo, "P2",
          "Sem Dependabot/Renovate configurado.",
          "Ligar o Dependabot: ele abre PR de bump e avisa de CVE sem ninguém precisar lembrar."),
         # Aviso de seguranca medido no settings de DEV nao vale como achado:
@@ -756,7 +773,7 @@ def auditoria(snap):
         # producao; o ambiente e local. Sem dizer isso, um W009 (SECRET_KEY
         # fraca) medido na maquina de quem audita lia como "producao insegura"
         # quando pode ser so a maquina de dev sem a variavel exportada.
-        (3, None if (sec_django is None or not dig(snap, "django", "ambiente_de_producao"))
+        (3, NAO_MEDIDO if (sec_django is None or not dig(snap, "django", "ambiente_de_producao"))
             else len(sec_django) == 0,
          "avisos de segurança do framework"
          + (_nao_medido(snap, "django", "deploy_issues")
@@ -786,7 +803,7 @@ def auditoria(snap):
     ci_cancel_sufixo = (f" · {int(ci_cancelados)} cancelado(s)"
                         if ci_cancelados else "")
     eixo("Confiabilidade", [
-        (3, None if ci_ok is None else ci_ok >= 85,
+        (3, NAO_MEDIDO if ci_ok is None else ci_ok >= 85,
          f"CI verde ({_valor(ci_ok, '%')}{ci_cancel_sufixo})"
          + (_nao_auditado(snap, "ci", "success_rate") if ci_ok is None else ""), "P1",
          f"Pipeline verde em apenas {ci_ok}% das execuções.",
@@ -794,7 +811,7 @@ def auditoria(snap):
         (3, _do_gov(runbooks), "runbook de operação" + gov_rotulo, "P1",
          "Sem runbooks: quando algo quebrar às 3h, a resposta está na cabeça de alguém.",
          "Escrever o passo a passo dos incidentes que já aconteceram — um arquivo por alerta."),
-        (2, None if pend is None else len(pend) == 0,
+        (2, NAO_MEDIDO if pend is None else len(pend) == 0,
          "migrations aplicadas"
          + (_nao_auditado(snap, "django", "pending_migrations") if pend is None else ""), "P2",
          f"{len(pend or [])} migration(s) pendente(s) no ambiente medido.",
@@ -808,14 +825,17 @@ def auditoria(snap):
     # ---------------- Processo ----------------
     bp = _seguro(gov.get("branch_protection"), dict, {})
     docs = _seguro(gov.get("docs"), dict, {})
-    protegido = bp.get("protegido") if bp.get("disponivel") else None
+    # `disponivel` falso cobre os dois casos de ambiente: gh mudo/rate-limit
+    # (bp["motivo"] presente) ou o coletor `governance` inteiro fora do ar
+    # (bp vira {}, "disponivel" ausente) — os dois viram NAO_MEDIDO.
+    protegido = bp.get("protegido") if bp.get("disponivel") else NAO_MEDIDO
     # `docs/criteria.md` e explicito: reportar "desprotegida" por falha de
     # requisicao "seria uma acusacao sem ter olhado". O criterio ja saia como
     # None — faltava a LINHA DE RESUMO parar de afirmar, e o motivo aparecer
     # junto do criterio quando ele existe (`bp["motivo"]`: gh ausente, repo
     # sem remote, rate limit).
     bp_rotulo = ""
-    if protegido is None:
+    if protegido is NAO_MEDIDO:
         bp_rotulo = (f" (não auditado: {bp['motivo']})"
                      if bp.get("motivo") else gov_rotulo)
 
@@ -1042,7 +1062,7 @@ def build_veredito(snap):
     cards = []
     for x in eixos:
         checados = "".join(
-            f'<li class="{"sim" if ok else "nao" if ok is False else "na"}">{e(rot)}</li>'
+            f'<li class="{"sim" if ok is True else "nao" if ok is False else "na"}">{e(rot)}</li>'
             for rot, ok in x["checados"]
         )
         # letra "NA" = nenhum criterio do eixo pode ser medido (total == 0
