@@ -8,17 +8,22 @@ something a black box hands down.
 
 ## How a grade is computed
 
-Each criterion returns one of three states:
+Each criterion returns one of four states:
 
 | State | Effect |
 |---|---|
 | met | its weight counts toward both the numerator and the denominator |
 | not met | its weight counts toward the denominator only, and it produces a line in the action plan |
-| **not audited** (`null`) | it is removed from the denominator entirely |
+| **environment-blocked** (`NAO_MEDIDO`) | the *collection environment* prevented the measurement — database down, `gh` silent, `radon` missing, a timeout, a collector that raised. Stays in the denominator; see "Uncertainty band" below |
+| **nothing to audit** (`null`) | the project genuinely has nothing there — a library with no deploy workflow, a private repo's license. Removed from the denominator entirely |
 
 ```
-grade % = sum(weights met) / sum(weights of criteria that were audited)
+worst % = sum(weights met) / sum(weights of {met, not met, environment-blocked})
+best  % = sum(weights met + environment-blocked) / sum(weights of {met, not met, environment-blocked})
 ```
+
+An axis with nothing environment-blocked has `worst == best`: one number,
+exactly as it has always been.
 
 | Grade | Range |
 |---|---|
@@ -28,20 +33,71 @@ grade % = sum(weights met) / sum(weights of criteria that were audited)
 | D | ≥ 40 % |
 | F | below 40 % |
 
-If **no** criterion in an axis could be measured, the denominator is zero and
-the axis gets **no letter** — the card shows a dash and "não auditado". It is
-never an `F`. A tool that reports failure because it could not look is worse
-than a tool that says nothing.
+The letter is computed independently at each end. If **no** criterion in an
+axis was met or not met — everything in it is either environment-blocked or
+nothing to audit — both ends are zero over zero, the axis gets **no letter**,
+and the card shows a dash and "não auditado". It is never an `F`. A tool that
+reports failure because it could not look is worse than a tool that says
+nothing.
 
 Each unmet criterion becomes a row in the action plan with a priority (`P0`,
 `P1`, `P2`), the finding, and the fix. P0 is reserved for a committed secret.
+An environment-blocked criterion produces its own `P2` row too — see below.
+
+### Uncertainty band
+
+An axis with at least one environment-blocked criterion does not report a
+single percentage — it reports a range, worst case to best case, and the card
+shows both: `B–A · 60–100%` instead of `A · 100%`. Worst case treats every
+environment-blocked criterion as failed; best case treats it as passed. When
+the two ends land on different letters the card shows both; when they land on
+the same letter with different percentages, it shows one letter and the
+percentage range.
+
+**The card's letter and color anchor on the worst case.** So does every trend
+arrow and every comparison between snapshots — they read the pessimistic end,
+never the midpoint or the optimistic one. A degraded collection environment
+can therefore never raise a grade or an arrow. The card also states how many
+criteria actually held up the number ("N of M criteria audited") and, when the
+axis is in a band, an explicit notice that the collection environment limited
+the measurement.
+
+This closed a real defect: before the split, an environment-blocked criterion
+left the denominator the same way "nothing to audit" does, and removing a
+*failing* criterion from the denominator inflates the ones that remain. This
+tool's own audit of a Django project scored Reliability B/75% with the
+database up, A/100% with the database down (the pending-migrations criterion
+could no longer be measured, and used to simply drop out), and B/80% once the
+database was back up — a project could raise its grade by turning a database
+off. With the band, a collection window like that no longer jumps to a full
+letter step; it renders as something like `B–A · 60–100%`, anchored on the
+pessimistic B, instead of quietly becoming an A.
+
+**A band requires at least one measured criterion.** An axis where every
+criterion is either environment-blocked or nothing to audit stays **NA** —
+`F–A · 0–100%` would be technically true and useless, and would break the
+existing meaning of "não auditado" (no letter, never an `F`).
+
+**Each environment-blocked criterion also produces its own `P2` row in the
+action plan** — what could not be measured, why, and how to restore it
+(bring the service up, install the tool, authenticate `gh`…). Without that
+row the collection gap is invisible, which is how the defect above went
+unnoticed for days.
+
+**The limit, stated plainly, the same way the Delivery axis states its own
+limits below: the band describes what the *auditor's* collection environment
+failed to see. It does not audit anyone's production environment** — a
+database unreachable from the machine running the audit is not evidence the
+production database is down, any more than it used to be evidence of health.
 
 ### The one deliberate exception
 
-**Missing coverage counts as a failure, not as "not audited."** Every other
-criterion drops out of the grade when it cannot be measured. Coverage does not:
-if no coverage report exists anywhere in the repository, the criterion fails and
-produces a P1.
+**Missing coverage counts as a failure, not as environment-blocked or nothing
+to audit.** Every other criterion that cannot be measured either opens the
+axis's uncertainty band (the environment failed to look) or drops out of the
+grade entirely (there was nothing there to look at). Coverage does neither: if
+no coverage report exists anywhere in the repository, the criterion fails
+outright and produces a P1.
 
 Not measuring coverage is a choice with a consequence — nobody knows what the
 suite protects. That is a finding about the project, not a limitation of the
@@ -292,12 +348,13 @@ looked."** README, documented decisions, license, pre-commit, changelog and the
 operational runbook are read out of the `governance` collector, where a missing
 field looks exactly like a missing file. The grade therefore checks the
 collector first: when `governance` is absent from the snapshot — it raised, and
-the error is in `errors.governance` — those criteria report as *não auditado*,
-carry that error as the reason on the card, and leave the denominator. When the
-collector ran, an absent file is a finding, as it should be. Without the
-distinction, one exception in a collector produced accusations ("no README",
-"no license", "no documented decisions", "no runbooks") about a project nobody
-had looked at.
+the error is in `errors.governance` — those criteria report as
+environment-blocked, carry that error as the reason on the card, and stay in
+the denominator, opening the axis's uncertainty band instead of quietly
+dropping out. When the collector ran, an absent file is a finding, as it
+should be. Without the distinction, one exception in a collector produced
+accusations ("no README", "no license", "no documented decisions", "no
+runbooks") about a project nobody had looked at.
 
 **Pre-commit and changelog are measured, not skipped, when absent.** Both used
 to read `value or None` — a measured "does not exist" (`false`/`null`) collapsed
@@ -305,8 +362,10 @@ into the same `None` as "the collector never ran," which pulled a real finding
 out of the denominator. That is the opposite failure from the one above: there
 it was "not measured" being read as clean, here it was "measured and missing"
 being read as "not measured." Both criteria now report a plain failure when the
-file is absent and the collector ran — the only case that removes them from the
-denominator is the `governance` collector having raised.
+file is absent and the collector ran — the only case where they are not a
+plain pass/fail is the `governance` collector having raised, and even then they
+stay in the denominator as environment-blocked rather than disappearing from
+it.
 
 **License is not applicable in a private repository, and the grade now says
 so instead of docking a point.** Visibility comes from the same `gh repo view`
@@ -319,9 +378,11 @@ but the label says the visibility itself was not established, so a missing
 license there is not misread as "confirmed public."
 
 A **404** from the protection endpoint is the answer that matters: the branch has
-no protection. Any other failure — 403, rate limit, network — leaves the
-criterion unaudited. Reporting "unprotected" because the request failed would be
-an accusation without a look.
+no protection. Any other failure — 403, rate limit, network — reports the
+criterion as environment-blocked instead: it stays in the denominator and opens
+the axis's uncertainty band, with the reason (rate limit, no `gh`, no remote…)
+on the card. Reporting "unprotected" because the request failed would be an
+accusation without a look.
 
 ---
 
