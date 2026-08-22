@@ -1405,7 +1405,9 @@ h3{font-size:13px;font-weight:700;letter-spacing:-.01em;margin:28px 0 8px}
 .eixos{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:12px;margin-top:18px}
 .eixo{display:flex;gap:13px;background:var(--card);border:1px solid var(--rule);padding:15px 16px}
 .eixo .letra{font-family:var(--mono);font-size:30px;font-weight:700;line-height:1;
-             letter-spacing:-.04em;min-width:36px}
+             /* nowrap + shrink 0: o par da faixa ("C–A") tem 3 chars e o
+                min-width de 1 letra quebrava a linha no meio do en-dash */
+             letter-spacing:-.04em;min-width:36px;white-space:nowrap;flex-shrink:0}
 .nota-A .letra,.nota-B .letra{color:var(--good)}
 .nota-C .letra{color:var(--warn)}
 .nota-D .letra,.nota-F .letra{color:var(--bad)}
