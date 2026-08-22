@@ -220,15 +220,18 @@ class TestCardComFaixa(unittest.TestCase):
         html = render.build_veredito(_snap_confiabilidade([]),
                                      [_snap_confiabilidade([])])
         self.assertIn('class="eixo nota-A"', html)
-        self.assertNotIn("–", html.split('class="letra"')[1][:30],
-                         "letra plena nao pode virar faixa")
         # `_snap_confiabilidade` so garante o eixo Confiabilidade pleno; os
         # outros eixos (Qualidade/Segurança/Processo) legitimamente carregam
         # NAO_MEDIDO por campos que este fixture nunca populou (tests,
         # quality, branch_protection) e mostram faixa deles mesmos — nao e
-        # regressao desta task. O assert isola o card de Confiabilidade
-        # (unico "nota-A" deste fixture) pra checar so o que a task controla.
+        # regressao desta task. Os dois asserts abaixo isolam o card de
+        # Confiabilidade (unico "nota-A" deste fixture, confirmado por
+        # inspecao direta de render.auditoria) pra checar so o que a task
+        # controla — NAO o primeiro "class=\"letra\"" do HTML inteiro
+        # (que seria o card de Entrega, NA, e passaria vazio de qualquer jeito).
         card_confiabilidade = html.split('<div class="eixo nota-A">')[1].split('<div class="eixo ')[0]
+        self.assertNotIn("–", card_confiabilidade.split('class="letra"')[1][:30],
+                         "letra plena nao pode virar faixa")
         self.assertNotIn("o ambiente da coleta limitou a medição", card_confiabilidade)
 
     def test_criterio_nao_medido_aparece_como_na_nunca_sim(self):

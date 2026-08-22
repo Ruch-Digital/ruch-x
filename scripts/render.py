@@ -1080,7 +1080,7 @@ def build_veredito(snap, snaps):
         # — mostra travessao no lugar da letra e um aviso proprio, com
         # classe CSS propria (nunca nota-F, que e vermelho).
         na = x["letra"] == "NA"
-        # pct pode divergir com letra igual (ex: 80-85, B-B) — e faixa do
+        # pct pode divergir com letra igual (ex: 80–85, B–B) — e faixa do
         # mesmo jeito; a letra so exibe par quando as letras diferem.
         faixa = (not na) and x["pct_max"] != x["pct"]
         letra_display = "—" if na else (
