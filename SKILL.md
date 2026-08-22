@@ -47,9 +47,10 @@ efeito na nota depende do motivo. Se o **projeto** genuinamente não tem aquilo
 ("nada a auditar": biblioteca sem deploy, licença em repositório privado), o
 critério fica fora da nota. Se foi o **ambiente da coleta** que impediu (banco
 fora, `gh` mudo, radon ausente, timeout), o critério fica no denominador e a
-nota do eixo vira uma **faixa de incerteza** (ex.: `B–A · 60–100%`), com letra,
-cor e seta de tendência ancoradas no pior caso — ambiente degradado nunca sobe
-nota. Se o painel mostrar faixa ou "não auditado", diga isso ao usuário em vez
+nota do eixo vira uma **faixa de incerteza**: o card mostra a **letra do pior
+caso**, e a linha de base explica o teto e o intervalo ("nota de pior caso …
+medindo tudo, chega a A (60–100%)"). Cor e seta de tendência também ancoram no
+pior caso — ambiente degradado nunca sobe nota. Se o painel mostrar faixa ou "não auditado", diga isso ao usuário em vez
 de tratar como aprovado; a faixa vem acompanhada de uma linha P2 no plano de
 ação dizendo como restaurar a medição.
 

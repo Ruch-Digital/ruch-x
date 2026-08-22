@@ -209,20 +209,27 @@ class TestPlanoDeAcao(unittest.TestCase):
 
 class TestCardComFaixa(unittest.TestCase):
 
-    def test_card_mostra_faixa_e_cor_pessimista(self):
+    def test_card_com_faixa_mostra_so_a_letra_pessimista_e_explica(self):
+        """Decisao do dono (2026-08-22 tarde): a letra grande e SO o pior
+        caso — o par "B–A" lia como nota quebrada, e usar a media reabriria
+        a FU (desligar o banco voltaria a subir nota). O teto e o motivo
+        ficam explicitos na linha de base do card."""
         html = render.build_veredito(_snap_confiabilidade("timeout"),
                                      [_snap_confiabilidade("timeout")])
-        self.assertIn("B–A", html)
         # `class="eixo nota-B"` cru varre as 5 cartas: neste fixture o eixo
         # Segurança tambem tem letra_max "B" (D->B), entao um mutante que
-        # trocasse `x["letra"]` por `x["letra_max"]` na classe do card
-        # (render.py, montagem de `cards`) sobreviveria escondido atras da
-        # carta errada. Isola a abertura do card de Confiabilidade pelo
-        # titulo (`<h3>Confiabilidade`) antes de checar a classe dela.
+        # trocasse `x["letra"]` por `x["letra_max"]` na classe ou na letra
+        # sobreviveria escondido atras da carta errada. Isola a abertura do
+        # card de Confiabilidade pelo titulo (`<h3>Confiabilidade`).
         tag_confiabilidade = html.split('<h3>Confiabilidade')[0].rsplit('<div class="eixo ', 1)[1]
         self.assertTrue(tag_confiabilidade.startswith('nota-B"'),
                          "a cor ancora na ponta pessimista")
-        self.assertIn("o ambiente da coleta limitou a medição", html)
+        letra_conf = tag_confiabilidade.split('class="letra"')[1][:30]
+        self.assertIn(">B<", letra_conf, "a letra grande e o pior caso, sozinho")
+        self.assertNotIn("–", letra_conf,
+                         "par de letras saiu do card por decisao do dono")
+        self.assertIn("nota de pior caso", html)
+        self.assertIn("chega a A (80–100%)", html)
 
     def test_card_pleno_identico_ao_de_hoje(self):
         html = render.build_veredito(_snap_confiabilidade([]),
@@ -240,7 +247,7 @@ class TestCardComFaixa(unittest.TestCase):
         card_confiabilidade = html.split('<div class="eixo nota-A">')[1].split('<div class="eixo ')[0]
         self.assertNotIn("–", card_confiabilidade.split('class="letra"')[1][:30],
                          "letra plena nao pode virar faixa")
-        self.assertNotIn("o ambiente da coleta limitou a medição", card_confiabilidade)
+        self.assertNotIn("nota de pior caso", card_confiabilidade)
 
     def test_criterio_nao_medido_aparece_como_na_nunca_sim(self):
         html = render.build_veredito(_snap_confiabilidade("timeout"),

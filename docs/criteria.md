@@ -47,12 +47,13 @@ An environment-blocked criterion produces its own `P2` row too — see below.
 ### Uncertainty band
 
 An axis with at least one environment-blocked criterion does not report a
-single percentage — it reports a range, worst case to best case, and the card
-shows both: `B–A · 60–100%` instead of `A · 100%`. Worst case treats every
-environment-blocked criterion as failed; best case treats it as passed. When
-the two ends land on different letters the card shows both; when they land on
-the same letter with different percentages, it shows one letter and the
-percentage range.
+single measured percentage — it computes a range, worst case to best case.
+Worst case treats every environment-blocked criterion as failed; best case
+treats it as passed. **The card's big letter shows only the worst case** (a
+letter pair read as a broken grade, and averaging the two ends would let a
+degraded environment raise the grade again); the range and the ceiling are
+spelled out on the card's base line — "worst-case grade: an unmeasured
+criterion counts as failed — measured in full, this reaches A (60–100%)".
 
 **The card's letter and color anchor on the worst case.** So does every trend
 arrow and every comparison between snapshots — they read the pessimistic end,
@@ -70,8 +71,8 @@ database up, A/100% with the database down (the pending-migrations criterion
 could no longer be measured, and used to simply drop out), and B/80% once the
 database was back up — a project could raise its grade by turning a database
 off. With the band, a collection window like that no longer jumps to a full
-letter step; it renders as something like `B–A · 60–100%`, anchored on the
-pessimistic B, instead of quietly becoming an A.
+letter step; it renders as the pessimistic `B` with an explicit "reaches A
+(80–100%)" note, instead of quietly becoming an A.
 
 **A band requires at least one measured criterion.** An axis where every
 criterion is either environment-blocked or nothing to audit stays **NA** —

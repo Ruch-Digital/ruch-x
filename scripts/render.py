@@ -1128,10 +1128,12 @@ def build_veredito(snap, snaps):
         # classe CSS propria (nunca nota-F, que e vermelho).
         na = x["letra"] == "NA"
         # pct pode divergir com letra igual (ex: 80–85, B–B) — e faixa do
-        # mesmo jeito; a letra so exibe par quando as letras diferem.
+        # mesmo jeito. A LETRA grande mostra so o pior caso (decisao do dono,
+        # 2026-08-22 tarde): o par "C–A" lia como nota quebrada, e a media
+        # reabriria a FU (desligar o banco voltaria a subir nota). O teto e o
+        # motivo ficam explicitos na linha de base do card.
         faixa = (not na) and x["pct_max"] != x["pct"]
-        letra_display = "—" if na else (
-            f'{x["letra"]}–{x["letra_max"]}' if x["letra_max"] != x["letra"] else x["letra"])
+        letra_display = "—" if na else x["letra"]
         # Quantos criterios sustentam a letra. Sem isso, "F" com 1 de 4
         # medidos e "F" com 4 de 4 sao a mesma imagem — e o primeiro e um
         # veredito com 25% de base. No eixo NA a frase abaixo ja diz que
@@ -1141,8 +1143,9 @@ def build_veredito(snap, snaps):
                 f'<p class="eixo-base">{seta}{" · " if seta else ""}'
                 f'{x["medidos"]} de {x["criterios"]} '
                 f'critérios auditados'
-                + (f' · nota em faixa ({x["pct"]}–{x["pct_max"]}%) — '
-                   f'o ambiente da coleta limitou a medição' if faixa else '')
+                + (f' · nota de pior caso: critério sem medição conta como '
+                   f'reprovado — medindo tudo, chega a {x["letra_max"]} '
+                   f'({x["pct"]}–{x["pct_max"]}%)' if faixa else '')
                 + '</p>')
         cards.append(
             f'<div class="eixo nota-{x["letra"]}">'

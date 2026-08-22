@@ -99,6 +99,12 @@ existente do NA (ex.: Processo com o coletor governance inteiro caido).
 
 - Card com faixa: `B–A · 60–100%` no lugar de `A · 100%`. Faixa degenerada (min == max)
   renderiza exatamente como hoje. A contagem "N de M criterios" continua no card.
+- **Adendo (2026-08-22 tarde, decisao do dono apos ver o painel real):** a LETRA grande
+  do card mostra so o pior caso ("C", nao "C–A") — o par lia como nota quebrada, e usar
+  a media reabriria a FU (desligar o banco voltaria a subir nota). O teto e o intervalo
+  ficam explicitos na linha de base do card ("nota de pior caso ... medindo tudo, chega
+  a A (70–100%)"). Formula, ancora e contrato do dict (pct/pct_max/letra/letra_max)
+  inalterados.
 - Tendencia, resumo e qualquer comparacao entre snapshots usam **`pct_min`**.
 - A faixa nasce no `render.py`, entao **snapshots historicos ganham a faixa
   retroativamente** — o A/100% versionado de 21/08 passa a exibir `B–A` sem recoleta.
