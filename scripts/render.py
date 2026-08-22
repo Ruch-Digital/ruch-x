@@ -1061,8 +1061,10 @@ def findings(snap):
 # secoes
 # --------------------------------------------------------------------------
 
-def build_veredito(snap):
+def build_veredito(snap, snaps):
     """Notas por eixo + plano de ação. E a primeira coisa que o cliente vê."""
+    # `snaps` (a serie historica) ainda nao e usada aqui — entra na Task 5
+    # (seta de tendencia). Aceita ja pra nao trocar a assinatura de novo.
     eixos, achados = auditoria(snap)
     if not eixos:
         return '<p class="empty">sem dados suficientes para o veredito</p>'
@@ -1078,16 +1080,24 @@ def build_veredito(snap):
         # — mostra travessao no lugar da letra e um aviso proprio, com
         # classe CSS propria (nunca nota-F, que e vermelho).
         na = x["letra"] == "NA"
+        # pct pode divergir com letra igual (ex: 80-85, B-B) — e faixa do
+        # mesmo jeito; a letra so exibe par quando as letras diferem.
+        faixa = (not na) and x["pct_max"] != x["pct"]
+        letra_display = "—" if na else (
+            f'{x["letra"]}–{x["letra_max"]}' if x["letra_max"] != x["letra"] else x["letra"])
         # Quantos criterios sustentam a letra. Sem isso, "F" com 1 de 4
         # medidos e "F" com 4 de 4 sao a mesma imagem — e o primeiro e um
         # veredito com 25% de base. No eixo NA a frase abaixo ja diz que
         # nada foi medido; repetir "0 de N" seria ruido.
         base = ('' if na else
                 f'<p class="eixo-base">{x["medidos"]} de {x["criterios"]} '
-                f'critérios auditados</p>')
+                f'critérios auditados'
+                + (f' · nota em faixa ({x["pct"]}–{x["pct_max"]}%) — '
+                   f'o ambiente da coleta limitou a medição' if faixa else '')
+                + '</p>')
         cards.append(
             f'<div class="eixo nota-{x["letra"]}">'
-            f'<div class="letra">{"—" if na else x["letra"]}</div>'
+            f'<div class="letra">{letra_display}</div>'
             f'<div class="eixo-corpo"><h3>{e(x["nome"])}</h3>'
             f'<p class="eixo-resumo">{e(x["resumo"])}</p>'
             + ('<p class="eixo-na">não auditado — nenhum critério deste eixo pôde ser medido</p>'
@@ -1491,7 +1501,7 @@ def render(snaps):
                 "Cinco eixos, cada um com os critérios que a engenharia atual considera padrão. "
                 "A nota é a fração dos critérios atendidos; a tabela abaixo é o plano de ação, "
                 "da prioridade mais alta para a mais baixa.",
-                build_veredito(snap), ident="veredito"),
+                build_veredito(snap, snaps), ident="veredito"),
         section("O que olhar primeiro",
                 "Ordenado por impacto, não por seção. Se estiver tudo vazio, o projeto passou nos limiares.",
                 f'<ul class="findings">{findings_html}</ul>'),

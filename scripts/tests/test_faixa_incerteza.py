@@ -207,5 +207,36 @@ class TestPlanoDeAcao(unittest.TestCase):
                           and "limitação do ambiente" in a[2]])
 
 
+class TestCardComFaixa(unittest.TestCase):
+
+    def test_card_mostra_faixa_e_cor_pessimista(self):
+        html = render.build_veredito(_snap_confiabilidade("timeout"),
+                                     [_snap_confiabilidade("timeout")])
+        self.assertIn("B–A", html)
+        self.assertIn('class="eixo nota-B"', html, "a cor ancora na ponta pessimista")
+        self.assertIn("o ambiente da coleta limitou a medição", html)
+
+    def test_card_pleno_identico_ao_de_hoje(self):
+        html = render.build_veredito(_snap_confiabilidade([]),
+                                     [_snap_confiabilidade([])])
+        self.assertIn('class="eixo nota-A"', html)
+        self.assertNotIn("–", html.split('class="letra"')[1][:30],
+                         "letra plena nao pode virar faixa")
+        # `_snap_confiabilidade` so garante o eixo Confiabilidade pleno; os
+        # outros eixos (Qualidade/Segurança/Processo) legitimamente carregam
+        # NAO_MEDIDO por campos que este fixture nunca populou (tests,
+        # quality, branch_protection) e mostram faixa deles mesmos — nao e
+        # regressao desta task. O assert isola o card de Confiabilidade
+        # (unico "nota-A" deste fixture) pra checar so o que a task controla.
+        card_confiabilidade = html.split('<div class="eixo nota-A">')[1].split('<div class="eixo ')[0]
+        self.assertNotIn("o ambiente da coleta limitou a medição", card_confiabilidade)
+
+    def test_criterio_nao_medido_aparece_como_na_nunca_sim(self):
+        html = render.build_veredito(_snap_confiabilidade("timeout"),
+                                     [_snap_confiabilidade("timeout")])
+        self.assertIn('class="na">migrations aplicadas', html)
+        self.assertNotIn('class="sim">migrations aplicadas', html)
+
+
 if __name__ == "__main__":
     unittest.main()
