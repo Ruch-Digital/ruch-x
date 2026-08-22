@@ -2,6 +2,7 @@
 
 > **FU-RUCHX-NAO-AUDITADO-PREMIA** · spec aprovada em 2026-08-22 (Wilkerson + Claude, Win11).
 > Decisao de produto tomada em chat; este doc registra o desenho pra implementacao.
+> ✅ **EXECUTADA no mesmo dia** — commits `d25e507..cb5c9b1` + display de pior caso `a521ee3`.
 
 ## O defeito
 

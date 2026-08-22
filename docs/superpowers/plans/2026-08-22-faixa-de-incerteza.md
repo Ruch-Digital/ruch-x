@@ -1,5 +1,9 @@
 # Faixa de Incerteza na Nota do Eixo — Implementation Plan
 
+> ✅ **EXECUTADO em 2026-08-22** (subagent-driven, 7 tasks + fix wave do review final):
+> commits `d25e507..cb5c9b1`, mais o display de pior caso decidido pelo dono ao ver o
+> painel real (`a521ee3`). Suite 207→240, 6+8 mutacoes mortas. Este doc e registro.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Eixo com criterio nao-medido por limitacao de AMBIENTE passa a mostrar faixa pessimista-otimista (ex: `B–A · 60–100%`) em vez de nota inflada; toda comparacao ancora na ponta pessimista.
