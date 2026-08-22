@@ -1063,11 +1063,17 @@ def findings(snap):
 
 def build_veredito(snap, snaps):
     """Notas por eixo + plano de ação. E a primeira coisa que o cliente vê."""
-    # `snaps` (a serie historica) ainda nao e usada aqui — entra na Task 5
-    # (seta de tendencia). Aceita ja pra nao trocar a assinatura de novo.
     eixos, achados = auditoria(snap)
     if not eixos:
         return '<p class="empty">sem dados suficientes para o veredito</p>'
+
+    # Serie do pct PESSIMISTA por eixo, snapshot a snapshot. A ancora e a
+    # decisao de produto da spec: desligar o banco nunca sobe a ponta
+    # pessimista, entao a seta nunca melhora por falta de medicao.
+    historico = {}
+    for s in snaps:
+        for x_h in auditoria(s)[0]:
+            historico.setdefault(x_h["nome"], []).append(x_h["pct"])
 
     cards = []
     for x in eixos:
@@ -1089,8 +1095,10 @@ def build_veredito(snap, snaps):
         # medidos e "F" com 4 de 4 sao a mesma imagem — e o primeiro e um
         # veredito com 25% de base. No eixo NA a frase abaixo ja diz que
         # nada foi medido; repetir "0 de N" seria ruido.
+        seta = delta(historico.get(x["nome"], []), atual=x["pct"])
         base = ('' if na else
-                f'<p class="eixo-base">{x["medidos"]} de {x["criterios"]} '
+                f'<p class="eixo-base">{seta}{" · " if seta else ""}'
+                f'{x["medidos"]} de {x["criterios"]} '
                 f'critérios auditados'
                 + (f' · nota em faixa ({x["pct"]}–{x["pct_max"]}%) — '
                    f'o ambiente da coleta limitou a medição' if faixa else '')

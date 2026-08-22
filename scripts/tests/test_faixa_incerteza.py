@@ -241,5 +241,35 @@ class TestCardComFaixa(unittest.TestCase):
         self.assertNotIn('class="sim">migrations aplicadas', html)
 
 
+class TestTendenciaPorEixo(unittest.TestCase):
+
+    def test_seta_compara_a_ponta_pessimista(self):
+        """Anterior com timeout: pessimista 50 (runbook False + migrations
+        NAO_MEDIDO), otimista 70. Atual: medicao plena com migrations
+        reprovando = 80. A seta certa e +30 (50->80); comparar a otimista
+        daria +10 (70->80) — e o teste morre se alguem regredir."""
+        anterior = _snap_confiabilidade("timeout")
+        anterior["governance"]["docs"]["runbooks"] = None
+        atual = _snap_confiabilidade(["app.0001_x"])
+        html = render.build_veredito(atual, [anterior, atual])
+        self.assertIn("▲ 30", html)
+        self.assertNotIn("▲ 10", html)
+
+    def test_snapshot_unico_sem_seta(self):
+        snap = _snap_confiabilidade([])
+        html = render.build_veredito(snap, [snap])
+        self.assertNotIn('class="delta', html)
+
+    def test_desligar_o_banco_nunca_sobe_a_seta(self):
+        """O proprio enredo da FU, agora como guard permanente: coleta plena
+        (80) seguida de coleta com o banco fora (pessimista 80, otimista 100)
+        tem que sair 'estável' — nunca seta pra cima."""
+        pleno = _snap_confiabilidade(["app.0001_x"])   # 8/10 = 80
+        quebrado = _snap_confiabilidade("timeout")     # 80-100
+        html = render.build_veredito(quebrado, [pleno, quebrado])
+        self.assertIn("estável", html)
+        self.assertNotIn("▲", html)
+
+
 if __name__ == "__main__":
     unittest.main()
