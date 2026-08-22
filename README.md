@@ -37,10 +37,17 @@ thresholds are explicit in `auditoria()` in `render.py`, deliberately: in an
 audit the criterion is up for discussion, not handed down by a black box.
 
 **A criterion the tool could not measure is reported as `null` — "not audited" —
-and drops out of the grade's denominator.** It neither rewards nor punishes, and
-an axis with nothing measurable gets no letter instead of an `F`. `0` and `[]`
-mean the opposite: measured, and empty. A report that cannot tell "we scanned
-and found no secrets" from "the scan never ran" is not an audit.
+and what happens to the grade depends on why.** If the *project* genuinely has
+nothing to audit (a library with no deploy workflow, a private repo's license),
+the criterion leaves the grade entirely. If the *collection environment* blocked
+the measurement (database down, `gh` silent, a timeout), the criterion stays in
+the denominator and the axis grade becomes an **uncertainty band** — worst case
+through best case, e.g. `B–A · 60–100%` — with the letter, the color, and every
+trend arrow anchored on the worst case, so a degraded environment can never
+raise a grade. An axis with nothing measured at all gets no letter instead of an
+`F`. `0` and `[]` mean the opposite: measured, and empty. A report that cannot
+tell "we scanned and found no secrets" from "the scan never ran" is not an
+audit. The full state table is in `docs/criteria.md`.
 
 Two decisions that came out of real use: **a secret in a test file or with a
 placeholder value is not a leak** (one false alarm and the whole report loses

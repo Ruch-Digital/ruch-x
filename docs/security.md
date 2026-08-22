@@ -228,10 +228,13 @@ field there is indistinguishable from a missing file, so the absence of the
 collector is checked before the absence of the file. An exception must not
 turn into a pile of accusations about a repository nobody looked at.
 
-In the dashboard the criterion is shown as *não auditado* with its reason, and
-it is removed from the denominator of the axis grade — it neither rewards nor
-punishes. An axis where nothing could be measured gets no letter at all; it does
-not become an `F`.
+In the dashboard the criterion is shown as *não auditado* with its reason, it
+stays in the denominator of the axis grade, and the grade becomes an
+**uncertainty band** — worst case through best case, anchored on the worst case
+in the letter, the color, and every trend comparison (see
+[criteria.md](criteria.md)). Degrading the collection environment can therefore
+never raise a grade. An axis where nothing could be measured gets no letter at
+all; it does not become an `F`.
 
 **A third state, distinct from "not audited": not applicable.** The license
 criterion drops out of the denominator in a `PRIVATE` repository too, but for a

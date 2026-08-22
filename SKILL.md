@@ -42,9 +42,16 @@ importa settings, apps e `.env` e abre conexão de banco. Rode em repositório
 que você confia. Auditar código de terceiro (due diligence de repo alheio) pede
 container ou VM descartável. Detalhe em `docs/security.md`.
 
-Critério que a ferramenta não conseguiu medir sai como **não auditado** e
-**não entra na nota** — nem premia nem pune. Se o painel disser "não auditado",
-diga isso ao usuário em vez de tratar como aprovado.
+Critério que a ferramenta não conseguiu medir sai como **não auditado** — e o
+efeito na nota depende do motivo. Se o **projeto** genuinamente não tem aquilo
+("nada a auditar": biblioteca sem deploy, licença em repositório privado), o
+critério fica fora da nota. Se foi o **ambiente da coleta** que impediu (banco
+fora, `gh` mudo, radon ausente, timeout), o critério fica no denominador e a
+nota do eixo vira uma **faixa de incerteza** (ex.: `B–A · 60–100%`), com letra,
+cor e seta de tendência ancoradas no pior caso — ambiente degradado nunca sobe
+nota. Se o painel mostrar faixa ou "não auditado", diga isso ao usuário em vez
+de tratar como aprovado; a faixa vem acompanhada de uma linha P2 no plano de
+ação dizendo como restaurar a medição.
 
 ## Como apresentar o veredito
 
