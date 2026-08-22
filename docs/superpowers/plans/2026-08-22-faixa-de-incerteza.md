@@ -92,6 +92,7 @@ def _snap_confiabilidade(migrations):
 
 class TestFaixaNoCalculo(unittest.TestCase):
 
+    @unittest.expectedFailure  # a classificacao chega na Task 2, que REMOVE este decorator
     def test_caso_da_fu_migrations_timeout_vira_faixa_e_nao_100(self):
         """O caso real de 21/08: timeout nas migrations NAO pode dar A/100."""
         x = _confiabilidade(_snap_confiabilidade("timeout"))
@@ -191,18 +192,26 @@ No closure `eixo()` dentro de `auditoria()` (~linhas 498-514), substituir o calc
         denominador e abre a faixa pessimista-otimista) · None (nada a
         auditar — fora de tudo).
         """
+        n_medidos = sum(1 for i in itens if i[1] is True or i[1] is False)
         total = sum(i[0] for i in itens if i[1] is not None)
         ganhos = sum(i[0] for i in itens if i[1] is True)
         incerto = sum(i[0] for i in itens if i[1] is NAO_MEDIDO)
         for peso, ok, rotulo, prio, txt, acao in itens:
             if ok is False:
                 achados.append((prio, nome, txt, acao))
-        pct, letra = _nota(ganhos, total)
-        pct_max, letra_max = _nota(ganhos + incerto, total)
+        if n_medidos == 0:
+            # Faixa exige pelo menos UMA medicao real. Eixo 100% nao-medido
+            # nao tem informacao nenhuma: "F–A 0–100%" seria tecnicamente
+            # verdadeiro e inutil — segue NA, o contrato de sempre.
+            pct, letra = _nota(0, 0)
+            pct_max, letra_max = pct, letra
+        else:
+            pct, letra = _nota(ganhos, total)
+            pct_max, letra_max = _nota(ganhos + incerto, total)
         eixos.append({"nome": nome, "pct": pct, "letra": letra,
                       "pct_max": pct_max, "letra_max": letra_max,
                       "resumo": resumo,
-                      "medidos": sum(1 for i in itens if i[1] is True or i[1] is False),
+                      "medidos": n_medidos,
                       "criterios": len(itens),
                       "checados": [(i[2], i[1]) for i in itens]})
 ```
@@ -377,7 +386,9 @@ e o item usa `mttr_ok` no lugar da expressao inline.
 
 Atencao aos rotulos: os sufixos `_nao_auditado(...)`/`" (não auditado: ...)"` NAO mudam — so o estado. `licenca_ok`/`protegido` que alimentam `_sim_nao` no resumo: `_sim_nao` compara `ok is None` → ajustar para tratar `NAO_MEDIDO` igual a None (`na if ok is None or ok is NAO_MEDIDO else ...`), senao o resumo de Processo estoura o `__bool__` da sentinela.
 
-**Varredura obrigatoria ao fim do step:** `Grep "if ok" e "if i[1]" e todo uso dos valores classificados em render.py` — qualquer `if <estado>:` truthy sobre um criterio agora ESTOURA TypeError pela sentinela (e proposital: falha ruidosa > classificacao silenciosa errada). Rodar a suite completa acha os que escaparem.
+**Varredura obrigatoria ao fim do step:** `Grep "if ok" e "if i[1]" e todo uso dos valores classificados em render.py` — qualquer `if <estado>:` truthy sobre um criterio agora ESTOURA TypeError pela sentinela (e proposital: falha ruidosa > classificacao silenciosa errada). Rodar a suite completa acha os que escaparem. **Um ja e conhecido e o fix minimo pertence a ESTA task:** o `class="{"sim" if ok else ...}"` do `build_veredito` (~linha 1009) vira `"sim" if ok is True else "nao" if ok is False else "na"` — sem isso a suite quebra entre a Task 2 e a Task 4. O resto do card (letra em faixa, aviso, assinatura) continua sendo da Task 4.
+
+Remover tambem o `@unittest.expectedFailure` de `test_caso_da_fu_migrations_timeout_vira_faixa_e_nao_100` (posto na Task 1 porque o teste so passa com a classificacao desta task).
 
 - [ ] **Step 4: Atualizar os 2 testes que afirmam a regra velha**
 

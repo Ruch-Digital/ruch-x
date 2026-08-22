@@ -77,6 +77,11 @@ regressao: nenhum eixo plenamente medido muda de nota com este fix).
 
 Letra: calculada nas duas pontas (`letra_min`, `letra_max`) pela mesma tabela de hoje.
 
+**Faixa exige pelo menos UM criterio medido (True ou False).** Eixo com zero medidos —
+tudo NAO_MEDIDO e/ou nada-a-auditar — segue **NA**, como hoje: `F–A · 0–100%` seria
+tecnicamente verdadeiro e inutil (nenhuma informacao), alem de quebrar o contrato
+existente do NA (ex.: Processo com o coletor governance inteiro caido).
+
 ### 3. Tela
 
 - Card com faixa: `B–A · 60–100%` no lugar de `A · 100%`. Faixa degenerada (min == max)
