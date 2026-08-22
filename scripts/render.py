@@ -534,9 +534,18 @@ def auditoria(snap):
         total = sum(i[0] for i in itens if i[1] is not None)
         ganhos = sum(i[0] for i in itens if i[1] is True)
         incerto = sum(i[0] for i in itens if i[1] is NAO_MEDIDO)
+        tem_aprovado = ganhos > 0
         for peso, ok, rotulo, prio, txt, acao in itens:
             if ok is False:
                 achados.append((prio, nome, txt, acao))
+            elif ok is NAO_MEDIDO and tem_aprovado:
+                # Sem esta linha o buraco de medicao fica invisivel — que e
+                # como a FU passou despercebida por 6 dias.
+                achados.append((
+                    "P2", nome,
+                    f"Critério «{rotulo}» não auditado por limitação do ambiente da coleta.",
+                    "Restaurar a medição (subir o serviço, instalar a ferramenta, "
+                    "autenticar o gh) — enquanto isso a nota do eixo fica em faixa."))
         if n_medidos == 0:
             # Faixa exige pelo menos UMA medicao real. Eixo 100% nao-medido
             # nao tem informacao nenhuma: "F–A 0–100%" seria tecnicamente

@@ -183,5 +183,24 @@ class TestClassificacaoDosCriterios(unittest.TestCase):
         self.assertIs(self._criterio(snap, "Confiabilidade", "infraestrutura"), render.NAO_MEDIDO)
 
 
+class TestPlanoDeAcao(unittest.TestCase):
+
+    def test_nao_medido_vira_linha_p2_com_motivo(self):
+        achados = render.auditoria(_snap_confiabilidade("timeout"))[1]
+        linha = next((a for a in achados
+                      if a[0] == "P2" and a[1] == "Confiabilidade"
+                      and "limitação do ambiente" in a[2]), None)
+        self.assertIsNotNone(linha, "criterio nao-medido nao apareceu no plano")
+        self.assertIn("timeout", linha[2], "o motivo tem que viajar junto")
+        self.assertIn("restaurar", linha[3].lower())
+
+    def test_nada_a_auditar_nao_vira_achado(self):
+        snap = _snap_confiabilidade([])
+        snap["governance"]["observabilidade"] = {"alertas": 0, "stack": [], "arquivos": 0}
+        snap["dora"] = {"workflows_de_deploy": []}
+        achados = render.auditoria(snap)[1]
+        self.assertFalse([a for a in achados if "limitação do ambiente" in a[2]])
+
+
 if __name__ == "__main__":
     unittest.main()
