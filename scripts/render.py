@@ -460,6 +460,30 @@ def _sim_nao(ok, sim="sim", nao="não", na="não auditado"):
 # medicao absoluta (radon). Ver o criterio do arquivo de maior atrito.
 LIMIAR_HOTSPOT = 150
 
+
+class _NaoMedido:
+    """Sentinela: criterio que o AMBIENTE da coleta impediu de medir (banco
+    fora, gh mudo, radon ausente, timeout, coletor caido, snapshot anterior
+    ao campo). Diferente de None ("nada a auditar": o projeto genuinamente
+    nao tem aquilo). A distincao existe porque tratar os dois igual deixava
+    um projeto MELHORAR de nota desligando o banco — o criterio que reprovava
+    saia do denominador e os restantes passavam a valer 100% (FU-RUCHX-
+    NAO-AUDITADO-PREMIA, 2026-08-22; spec em docs/superpowers/specs/).
+
+    Identidade via `is`. Truthiness proibida: `bool()` estoura de proposito,
+    porque `if ok:` num criterio classificaria a sentinela como aprovada.
+    """
+    __slots__ = ()
+
+    def __bool__(self):
+        raise TypeError("NAO_MEDIDO nao tem truthiness — compare com `is`")
+
+    def __repr__(self):
+        return "NAO_MEDIDO"
+
+
+NAO_MEDIDO = _NaoMedido()
+
 NIVEIS_DORA = {  # (elite, alto, medio) — abaixo disso e baixo
     "deploys_por_semana": (7, 1, 0.25),
     "lead_time_p50_h": (24, 168, 720),      # menor e melhor
@@ -496,20 +520,32 @@ def auditoria(snap):
     eixos, achados = [], []
 
     def eixo(nome, itens, resumo):
-        """itens = [(peso, ok, rotulo, prioridade, achado, acao)]"""
+        """itens = [(peso, ok, rotulo, prioridade, achado, acao)]
+
+        ok: True/False (medido) · NAO_MEDIDO (ambiente limitou — fica no
+        denominador e abre a faixa pessimista-otimista) · None (nada a
+        auditar — fora de tudo).
+        """
+        n_medidos = sum(1 for i in itens if i[1] is True or i[1] is False)
         total = sum(i[0] for i in itens if i[1] is not None)
         ganhos = sum(i[0] for i in itens if i[1] is True)
+        incerto = sum(i[0] for i in itens if i[1] is NAO_MEDIDO)
         for peso, ok, rotulo, prio, txt, acao in itens:
             if ok is False:
                 achados.append((prio, nome, txt, acao))
-        pct, letra = _nota(ganhos, total)
-        # A letra sozinha nao distingue um eixo auditado inteiro de um eixo
-        # apoiado num unico criterio: "F" com 1 de 4 medidos e "F" com 4 de 4
-        # sao visualmente identicos, e o primeiro e uma opiniao com 25% de
-        # base. A contagem vai pro card pra que a nota possa ser lida com o
-        # tamanho da amostra ao lado (nao muda o calculo — so o que a tela diz).
-        eixos.append({"nome": nome, "pct": pct, "letra": letra, "resumo": resumo,
-                      "medidos": sum(1 for i in itens if i[1] is not None),
+        if n_medidos == 0:
+            # Faixa exige pelo menos UMA medicao real. Eixo 100% nao-medido
+            # nao tem informacao nenhuma: "F–A 0–100%" seria tecnicamente
+            # verdadeiro e inutil — segue NA, o contrato de sempre.
+            pct, letra = _nota(0, 0)
+            pct_max, letra_max = pct, letra
+        else:
+            pct, letra = _nota(ganhos, total)
+            pct_max, letra_max = _nota(ganhos + incerto, total)
+        eixos.append({"nome": nome, "pct": pct, "letra": letra,
+                      "pct_max": pct_max, "letra_max": letra_max,
+                      "resumo": resumo,
+                      "medidos": n_medidos,
                       "criterios": len(itens),
                       "checados": [(i[2], i[1]) for i in itens]})
 
