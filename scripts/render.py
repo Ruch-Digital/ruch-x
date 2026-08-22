@@ -376,6 +376,32 @@ def _nao_auditado(snap, coletor, *campo):
     return f" (não auditado: {generico})" if generico else ""
 
 
+# Motivo exato que collect_django() grava em `nao_medido` quando o repositorio
+# nao tem manage.py na raiz (collect.py, collect_django) — distinto do motivo
+# de um `manage_py` configurado no toml que nao resolve ("manage_py
+# configurado (...) não resolve dentro do repositório"), que continua sendo
+# configuracao quebrada (ambiente), nao ausencia de Django.
+MOTIVO_SEM_MANAGE_PY = "projeto sem manage.py na raiz"
+
+
+def _django_sem_manage_py(snap, campo):
+    """True quando `campo` esta NAO_MEDIDO especificamente por o repositorio
+    nao usar Django — nao por falha de ambiente.
+
+    Ruling pos-review-final (2026-08-22): "sem manage.py" e "nada a auditar"
+    (None), no mesmo sentido de zero-workflows e sem-deploy-identificado —
+    nao ser um projeto Django nao e o AMBIENTE que impediu a medicao, e o
+    projeto genuinamente nao ter aquilo. Sem esta distincao um repositorio
+    Go/Node ficava BANDADO pra sempre em Confiabilidade/Seguranca, com um P2
+    cuja acao ("subir o serviço, instalar a ferramenta...") nunca pode ser
+    cumprida. Outras causas de nao-medicao no mesmo campo (timeout, settings
+    quebrado, `manage_py` do toml que nao resolve) continuam NAO_MEDIDO —
+    o motivo tem que casar exatamente com o texto que so `collect_django`
+    grava quando `manage.py` simplesmente nao existe.
+    """
+    return dig(snap, "django", "nao_medido", campo) == MOTIVO_SEM_MANAGE_PY
+
+
 def _observabilidade(snap, gov):
     """`(ok, sufixo_do_rotulo)` do criterio de observabilidade.
 
@@ -728,6 +754,7 @@ def auditoria(snap):
     total_deps = _seguro(deps.get("total"), (int, float))
     pct_velhas = (100 * desatual / total_deps) if (desatual is not None and total_deps) else None
     sec_django = _seguro(dig(snap, "django", "deploy_issues"), list)
+    sec_django_sem_django = _django_sem_manage_py(snap, "deploy_issues")
     # A linha de resumo do eixo e a unica coisa que muita gente le. Ela nao
     # pode afirmar "0 segredo(s) · 0 action(s) sem pin" com o coletor
     # `governance` inteiro caido — era o achado parqueado da Task 3
@@ -766,7 +793,17 @@ def auditoria(snap):
              or gov_rotulo) if pct_velhas is None else ""), "P2",
          f"{desatual} de {total_deps} dependências desatualizadas ({pct_velhas:.0f}%)." if pct_velhas else "",
          "Dependência velha é dívida com juros: quanto mais espera, mais caro e arriscado o upgrade."),
-        (2, _do_gov(gov.get("dependabot")), "atualização automática de dependências" + gov_rotulo, "P2",
+        # "dependabot" ausente do dict (nao `False`) e snapshot ANTERIOR ao
+        # campo — regra conservadora da spec: campo que a coleta nem sabia
+        # medir nao pode virar acusacao ("sem Dependabot") por chave que
+        # nunca existiu. `gov_raw is None` (coletor `governance` caido)
+        # tambem cai aqui: `gov` vira `{}` e a chave nunca esta presente, e
+        # `_do_gov` ja devolveria NAO_MEDIDO do mesmo jeito — os dois ramos
+        # convergem.
+        (2, NAO_MEDIDO if "dependabot" not in gov else _do_gov(gov.get("dependabot")),
+         "atualização automática de dependências" + gov_rotulo
+         + ("" if gov_raw is None or "dependabot" in gov
+            else " (não auditado: snapshot anterior ao campo dependabot)"), "P2",
          "Sem Dependabot/Renovate configurado.",
          "Ligar o Dependabot: ele abre PR de bump e avisa de CVE sem ninguém precisar lembrar."),
         # Aviso de seguranca medido no settings de DEV nao vale como achado:
@@ -781,10 +818,12 @@ def auditoria(snap):
         # producao; o ambiente e local. Sem dizer isso, um W009 (SECRET_KEY
         # fraca) medido na maquina de quem audita lia como "producao insegura"
         # quando pode ser so a maquina de dev sem a variavel exportada.
-        (3, NAO_MEDIDO if (sec_django is None or not dig(snap, "django", "ambiente_de_producao"))
+        (3, None if sec_django_sem_django
+            else NAO_MEDIDO if (sec_django is None or not dig(snap, "django", "ambiente_de_producao"))
             else len(sec_django) == 0,
          "avisos de segurança do framework"
-         + (_nao_medido(snap, "django", "deploy_issues")
+         + (" (projeto não usa Django — nada a auditar)" if sec_django_sem_django
+            else _nao_medido(snap, "django", "deploy_issues")
             or ("" if dig(snap, "django", "ambiente_de_producao")
                 else " (não auditado: settings de dev)")), "P1",
          f"{len(sec_django or [])} aviso(s) de segurança no check de deploy "
@@ -801,6 +840,7 @@ def auditoria(snap):
     obs_ok, obs_rotulo = _observabilidade(snap, gov)
     runbooks = dig(snap, "governance", "docs", "runbooks")
     pend = _seguro(dig(snap, "django", "pending_migrations"), list)
+    pend_sem_django = _django_sem_manage_py(snap, "pending_migrations")
     ci_ok = _seguro(dig(snap, "ci", "success_rate"), (int, float))
     # A taxa CONTINUA sendo sucesso sobre concluido (sucesso+falha) — cancelar
     # nao e falhar, as vezes e run substituido por um push seguinte. O que
@@ -819,9 +859,10 @@ def auditoria(snap):
         (3, _do_gov(runbooks), "runbook de operação" + gov_rotulo, "P1",
          "Sem runbooks: quando algo quebrar às 3h, a resposta está na cabeça de alguém.",
          "Escrever o passo a passo dos incidentes que já aconteceram — um arquivo por alerta."),
-        (2, NAO_MEDIDO if pend is None else len(pend) == 0,
+        (2, None if pend_sem_django else NAO_MEDIDO if pend is None else len(pend) == 0,
          "migrations aplicadas"
-         + (_nao_auditado(snap, "django", "pending_migrations") if pend is None else ""), "P2",
+         + (" (projeto não usa Django — nada a auditar)" if pend_sem_django
+            else _nao_auditado(snap, "django", "pending_migrations") if pend is None else ""), "P2",
          f"{len(pend or [])} migration(s) pendente(s) no ambiente medido.",
          "Aplicar ou confirmar que o alvo da medição é o ambiente certo."),
         (2, obs_ok, "infraestrutura observável" + obs_rotulo, "P2",

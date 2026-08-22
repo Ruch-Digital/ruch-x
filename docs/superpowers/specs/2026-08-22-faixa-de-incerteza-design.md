@@ -64,6 +64,19 @@ Casos ja resolvidos que NAO mudam:
 - **Snapshot anterior a um campo** (ex.: `metodo` do hotspot ausente) e procedencia
   desconhecida → `NAO_MEDIDO` (entra na faixa como incerteza; conservador).
 
+**Ruling pos-review-final (2026-08-22):** projeto sem `manage.py` na raiz (repo Go/Node/etc,
+sem stack Django nenhuma) e `None` ("nada a auditar"), NAO `NAO_MEDIDO`, nas duas pontas que
+o campo `django.nao_medido` alimenta — "migrations aplicadas" (Confiabilidade) e "avisos de
+seguranca do framework" (Seguranca). E o espelho exato da alternativa (b) rejeitada na secao
+de decisoes: nao ter uma stack nao e o AMBIENTE que impediu a medicao, e o projeto genuinamente
+nao ter aquilo — mesmo principio de zero-workflows (`_observabilidade`, workflows sem_pin) e
+sem-deploy-identificado. Sem este ruling um repositorio que nem Django e ficava BANDADO pra
+sempre (Seguranca/Confiabilidade B-A eternos) com um P2 permanente cuja acao ("subir o servico,
+instalar a ferramenta...") nunca podia ser cumprida. Outras causas do mesmo campo — timeout,
+settings quebrado, `manage_py` configurado no toml que nao resolve dentro do repositorio —
+continuam `NAO_MEDIDO`: a distincao e pelo texto EXATO do motivo que `collect_django` grava,
+nunca por inferencia.
+
 ### 2. Formula
 
 ```

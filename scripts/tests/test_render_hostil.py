@@ -213,6 +213,12 @@ class TestSiblingWorkflowsNaoMedido(unittest.TestCase):
             "segredos_commitados": [],
             "workflows": {"count": 2, "sem_pin": [], "sem_permissions": []},
             "dependencias": {},
+            # Explicito (nao omitido): omitir a chave e o proprio cenario do
+            # Finding 2 (2026-08-22) — snapshot anterior ao campo vira
+            # NAO_MEDIDO, nao mais o "False" antigo. Este teste testa
+            # workflow limpo, entao a chave precisa estar presente pra o
+            # rotulo sair sem sufixo de nao-auditado.
+            "dependabot": True,
         })
         eixos = {x["nome"]: x for x in render.auditoria(com_governance)[0]}
         checklist = eixos["Segurança"]["checados"]
@@ -704,7 +710,12 @@ class TestCritical1NenhumNoneNaTela(unittest.TestCase):
         html = render.render([self._coletores_caidos()])
         self.assertIn("git log falhou", html)          # git.nao_medido.hotspots
         self.assertIn("radon nao instalado", html)     # quality.nao_medido.complexity
-        self.assertIn("projeto sem manage.py na raiz", html)
+        # Sem manage.py e "nada a auditar" (ruling pos-review-final
+        # 2026-08-22), nao mais NAO_MEDIDO — o motivo cru do coletor
+        # ("projeto sem manage.py na raiz") deixou de aparecer VERBATIM na
+        # tela pra este caso; o rotulo mostra o veredito ("nada a auditar"),
+        # nao a causa tecnica, do mesmo jeito que zero-workflows ja fazia.
+        self.assertIn("projeto não usa Django — nada a auditar", html)
 
     def test_criterio_de_coletor_que_nem_rodou_diz_por_que(self):
         """Coletor que levanta excecao nao deixa a propria chave no snapshot,
@@ -871,13 +882,21 @@ class TestMinor6RotuloDoDjango(unittest.TestCase):
     e o texto do caso em que o check RODOU contra settings de dev."""
 
     def test_repo_sem_django_nao_culpa_settings_de_dev(self):
+        """Ruling pos-review-final (2026-08-22): sem manage.py e "nada a
+        auditar" (None), nao ambiente (NAO_MEDIDO) — mesma logica de
+        zero-workflows e sem-deploy-identificado. Um repositorio que nem
+        Django e nao tem "avisos de seguranca do framework" pra medir; antes
+        deste ruling o criterio ficava NAO_MEDIDO pra sempre, bandando
+        Seguranca eternamente com um P2 cuja acao ("subir o servico...")
+        nunca podia ser cumprida por um projeto Go/Node.
+        """
         snap = _snap(django={
             "pending_migrations": None, "deploy_issues": None, "other_issues": None,
             "nao_medido": {"deploy_issues": "projeto sem manage.py na raiz"},
         })
         rot, ok = _criterio(snap, "Segurança", "avisos de segurança do framework")
-        self.assertIs(ok, render.NAO_MEDIDO)
-        self.assertIn("projeto sem manage.py", rot)
+        self.assertIsNone(ok)
+        self.assertIn("nada a auditar", rot)
         self.assertNotIn("settings de dev", rot)
 
     def test_django_em_dev_continua_dizendo_settings_de_dev(self):
@@ -887,6 +906,108 @@ class TestMinor6RotuloDoDjango(unittest.TestCase):
         rot, ok = _criterio(snap, "Segurança", "avisos de segurança do framework")
         self.assertIs(ok, render.NAO_MEDIDO)
         self.assertIn("settings de dev", rot)
+
+
+class TestFinding1DjangoAusenteNadaAAuditar(unittest.TestCase):
+    """Ruling pos-review-final (2026-08-22): "projeto sem manage.py na raiz"
+    e "nada a auditar" (None) nas duas pontas que o consomem — migrations
+    aplicadas (Confiabilidade) e avisos de segurança do framework
+    (Segurança) — nunca mais NAO_MEDIDO. Sem isto um repositorio Go/Node
+    ficava BANDADO pra sempre nos dois eixos (Segurança/Confiabilidade
+    B–A eternos), com um P2 permanente cuja ação ("subir o serviço, instalar
+    a ferramenta...") nunca podia ser cumprida por quem não usa Django —
+    mesmo principio de zero-workflows e sem-deploy-identificado.
+    """
+
+    @staticmethod
+    def _snap_sem_django():
+        """Todo criterio NAO-Django de Confiabilidade/Segurança medido e
+        aprovado — isola o efeito dos dois criterios Django no pct/pct_max
+        dos eixos."""
+        return _snap(
+            django={
+                "pending_migrations": None, "deploy_issues": None, "other_issues": None,
+                "nao_medido": {"pending_migrations": "projeto sem manage.py na raiz",
+                               "deploy_issues": "projeto sem manage.py na raiz"},
+            },
+            ci={"success_rate": 97.0},
+            governance={
+                "docs": {"runbooks": "runbooks/"},
+                "segredos_commitados": [],
+                "workflows": {"count": 1, "sem_pin": [], "sem_permissions": []},
+                "dependencias": {"desatualizadas": 0, "total": 10},
+                "dependabot": True,
+                "observabilidade": {"alertas": 3, "stack": ["prometheus"]},
+            },
+        )
+
+    def test_repo_sem_django_nao_banda_confiabilidade_nem_seguranca(self):
+        eixos = {x["nome"]: x for x in render.auditoria(self._snap_sem_django())[0]}
+        for nome in ("Confiabilidade", "Segurança"):
+            self.assertEqual(eixos[nome]["pct"], eixos[nome]["pct_max"],
+                              f"{nome}: não pode haver faixa vinda do critério Django")
+            self.assertEqual(eixos[nome]["letra"], eixos[nome]["letra_max"])
+            self.assertEqual(eixos[nome]["pct"], 100)
+
+    def test_repo_sem_django_nao_gera_achado_de_ambiente_para_django(self):
+        achados = render.auditoria(self._snap_sem_django())[1]
+        para_django = [a for a in achados
+                       if a[1] in ("Confiabilidade", "Segurança")
+                       and "limitação do ambiente" in a[2]]
+        self.assertEqual(para_django, [])
+
+    def test_timeout_continua_nao_medido_guard_contra_sobrecorrecao(self):
+        """Motivo diferente ("timeout") NÃO pode virar "nada a auditar" — só
+        o texto EXATO que `collect_django` grava quando falta manage.py
+        aciona a regra nova. Guarda contra sobrecorreção: qualquer
+        NAO_MEDIDO de `pending_migrations` viraria None."""
+        snap = _snap(django={"pending_migrations": None,
+                             "nao_medido": {"pending_migrations": "timeout"}})
+        rot, ok = _criterio(snap, "Confiabilidade", "migrations aplicadas")
+        self.assertIs(ok, render.NAO_MEDIDO)
+        self.assertIn("timeout", rot)
+
+    def test_manage_py_configurado_que_nao_resolve_continua_nao_medido(self):
+        """Typo no toml (`manage_py` configurado que não aponta pra dentro do
+        repo) NÃO pode se confundir com "projeto não é Django" — é
+        configuração QUEBRADA (ambiente), não ausência de stack."""
+        motivo = "manage_py configurado (backend/manage.py) não resolve dentro do repositório"
+        snap = _snap(django={"pending_migrations": None,
+                             "nao_medido": {"pending_migrations": motivo}})
+        rot, ok = _criterio(snap, "Confiabilidade", "migrations aplicadas")
+        self.assertIs(ok, render.NAO_MEDIDO)
+        self.assertIn("manage_py configurado", rot)
+
+
+class TestFinding2DependabotSnapshotAntigo(unittest.TestCase):
+    """`gov.get('dependabot')` sem a CHAVE (snapshot anterior ao campo) virava
+    `bool(None) == False` — acusação ("sem Dependabot") sem ter checado nada.
+    Regra conservadora da spec: campo que a coleta nem sabia medir vira
+    NAO_MEDIDO, não reprovação."""
+
+    def test_chave_ausente_e_nao_medido(self):
+        snap = _snap(governance={
+            "segredos_commitados": [], "workflows": {}, "dependencias": {},
+        })
+        rot, ok = _criterio(snap, "Segurança", "atualização automática de dependências")
+        self.assertIs(ok, render.NAO_MEDIDO)
+
+    def test_chave_presente_false_continua_reprovando(self):
+        """Mutação inversa: a chave presente e `False` continua sendo achado
+        de verdade — o fix não pode apagar um "sem Dependabot" real."""
+        snap = _snap(governance={
+            "segredos_commitados": [], "workflows": {}, "dependencias": {},
+            "dependabot": False,
+        })
+        rot, ok = _criterio(snap, "Segurança", "atualização automática de dependências")
+        self.assertIs(ok, False)
+
+    def test_governance_inteiro_caido_continua_nao_medido(self):
+        """`gov_raw is None` (coletor `governance` nem rodou) converge no
+        mesmo NAO_MEDIDO — os dois ramos do fix não podem se contradizer."""
+        snap = _snap(errors={"governance": "gh: comando nao encontrado"})
+        rot, ok = _criterio(snap, "Segurança", "atualização automática de dependências")
+        self.assertIs(ok, render.NAO_MEDIDO)
 
 
 # ----------------------------------------------------------------------

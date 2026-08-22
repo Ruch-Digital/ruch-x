@@ -217,8 +217,8 @@ before 2026-08-20 it granted 5 free points over a repo with one imperfect
 workflow. Zero workflows now reads as "nothing to audit" — excluded from the
 score, neither reward nor penalty.
 | Dependencies up to date | 2 | P2 | fewer than 25 % outdated | `pip`/`npm` could not produce both counts |
-| Automated dependency updates | 2 | P2 | `.github/dependabot.yml` or `.github/renovate.json` exists | the `governance` collector raised |
-| Framework security warnings | 3 | P1 | `check --deploy` reported no `security.*` | `check --deploy` did not run, **or** `[django] settings_module` is unset |
+| Automated dependency updates | 2 | P2 | `.github/dependabot.yml` or `.github/renovate.json` exists | the `governance` collector raised, **or** the snapshot predates the field (key absent from `governance`) |
+| Framework security warnings | 3 | P1 | `check --deploy` reported no `security.*` | **nothing to audit** when the project has no `manage.py` (it is not a Django project); not audited when `check --deploy` did not run for another reason, **or** `[django] settings_module` is unset |
 
 Three details that decide whether the report is believable:
 
@@ -246,7 +246,7 @@ Source: Google SRE for the operational items.
 |---|---|---|---|
 | CI green | 3 | success rate ≥ 85 % | no GitHub Actions data |
 | Operational runbook | 3 | `docs/runbooks/`, `runbooks/` or `docs/deploy/runbooks/` contains any `.md` | the `governance` collector raised — see the Process axis |
-| Migrations applied | 2 | no pending migration | `showmigrations` failed, the project has no `manage.py`, or the toml's `manage_py` does not resolve inside the root |
+| Migrations applied | 2 | no pending migration | **nothing to audit** when the project has no `manage.py` (it is not a Django project); not audited when `showmigrations` failed, or the toml's `manage_py` does not resolve inside the root |
 | Observable infrastructure | 2 | the repository declares at least one alerting rule | the `governance` collector raised, or nothing is declared and no deploy workflow was identified |
 
 Below 85 % green, a team learns to ignore red. That is the reason the threshold
@@ -329,6 +329,21 @@ field is `null` and the reason says so, and a `manage_py` configured in the toml
 that does not resolve gets a different reason — a typo in the config must not
 look like a project that simply is not Django.
 
+**Not being a Django project is nothing to audit, not an environment
+failure (2026-08-22 ruling).** A repository with no `manage.py` used to keep
+this criterion — and "framework security warnings" below — permanently
+environment-blocked: a Go or Node repository was banded in Security and
+Reliability forever, carrying a P2 line whose action ("bring the service up,
+install the tool…") could never be performed. Not having Django is the same
+kind of absence as a library with no deploy workflow or a repo with zero
+workflows: the project genuinely does not have that thing, so both criteria
+now read as *nothing to audit* for this specific cause. Every other reason
+the same field can be unmeasured — `showmigrations`/`check --deploy` timing
+out, a `manage_py` configured in the toml that does not resolve, a broken
+settings module — is still environment-blocked, exactly as before; the
+distinction is made against the exact reason string the collector records,
+never inferred.
+
 ## Process
 
 | Criterion | Weight | Met when | Not audited / not applicable when |
@@ -336,7 +351,7 @@ look like a project that simply is not Django.
 | Production branch protected | 4 | the GitHub API reports branch protection | `gh` is absent, the repo has no GitHub remote, or the API call failed for any reason other than 404 |
 | README | 2 | `README.md`/`.rst`/`.txt` exists | the `governance` collector raised |
 | Documented decisions | 2 | `docs/adr/`, `docs/decisions/`, `adr/`, `docs/decisoes/` or `docs/` contains `.md` | idem |
-| License | 1 | `LICENSE` (any common extension) exists | **not applicable** when the repo's visibility is `PRIVATE`; not audited when the `governance` collector raised or visibility could not be determined |
+| License | 1 | `LICENSE` (any common extension) exists | **not applicable** when the repo's visibility is `PRIVATE`; not audited when the `governance` collector raised — when visibility could not be determined the criterion still fails an absent file, the label only notes visibility wasn't established |
 | Pre-commit hooks | 1 | `.pre-commit-config.yaml` exists | the `governance` collector raised |
 | Changelog | 2 | `CHANGELOG.md` or `docs/CHANGELOG.md` exists | idem |
 
