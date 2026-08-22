@@ -1,0 +1,456 @@
+{
+  "schema": 2,
+  "project": "ruch-x",
+  "generated_at": "2026-08-22T13:49:03-03:00",
+  "collectors_run": [
+    "stack",
+    "code",
+    "quality",
+    "tests",
+    "django",
+    "git",
+    "ci",
+    "governance",
+    "dora"
+  ],
+  "errors": {
+    "db": "sem DSN. Defina RUCHX_DATABASE_URL (ou DATABASE_URL) apontando para um usuario somente-leitura.",
+    "infra": "sem vinculo declarado repo<->infra: defina [infra] project_prefix no ruch-x.toml — sem ele a coleta atribuiria ao repo os containers do host inteiro"
+  },
+  "stack": {
+    "detected": [
+      "Python"
+    ],
+    "primary": "Python",
+    "dependencies": null
+  },
+  "code": {
+    "tool": "builtin",
+    "total_loc": 6438,
+    "total_files": 10,
+    "by_language": [
+      {
+        "language": "Python",
+        "files": 10,
+        "code": 6438,
+        "comments": 0,
+        "blanks": 0,
+        "complexity": 0
+      }
+    ],
+    "by_app": [
+      {
+        "app": "scripts",
+        "code": 2950,
+        "tests": 2778,
+        "test_ratio": 0.94
+      }
+    ],
+    "comment_ratio": null,
+    "module_label": "Pasta"
+  },
+  "quality": {
+    "ruff": {
+      "total": 59,
+      "by_rule": [
+        {
+          "rule": "ISC004",
+          "count": 22
+        },
+        {
+          "rule": "FURB167",
+          "count": 10
+        },
+        {
+          "rule": "RUF059",
+          "count": 7
+        },
+        {
+          "rule": "I001",
+          "count": 6
+        },
+        {
+          "rule": "RUF100",
+          "count": 4
+        },
+        {
+          "rule": "SIM117",
+          "count": 3
+        },
+        {
+          "rule": "DTZ005",
+          "count": 2
+        },
+        {
+          "rule": "PLW1510",
+          "count": 1
+        },
+        {
+          "rule": "S112",
+          "count": 1
+        },
+        {
+          "rule": "F541",
+          "count": 1
+        },
+        {
+          "rule": "UP031",
+          "count": 1
+        },
+        {
+          "rule": "F401",
+          "count": 1
+        }
+      ],
+      "worst_files": [
+        {
+          "file": "scripts\\render.py",
+          "count": 23
+        },
+        {
+          "file": "scripts\\collect.py",
+          "count": 17
+        },
+        {
+          "file": "scripts\\tests\\test_render_hostil.py",
+          "count": 8
+        },
+        {
+          "file": "scripts\\tests\\test_nao_medido.py",
+          "count": 4
+        },
+        {
+          "file": "scripts\\doctor.py",
+          "count": 3
+        },
+        {
+          "file": "scripts\\tests\\test_caminhos.py",
+          "count": 1
+        },
+        {
+          "file": "scripts\\tests\\test_docs.py",
+          "count": 1
+        },
+        {
+          "file": "scripts\\tests\\test_faixa_incerteza.py",
+          "count": 1
+        },
+        {
+          "file": "scripts\\tests\\test_redacao.py",
+          "count": 1
+        }
+      ]
+    },
+    "complexity": {
+      "blocks_analyzed": 436,
+      "avg": 3.72,
+      "above_10": 31,
+      "worst": [
+        {
+          "file": "scripts\\render.py",
+          "name": "auditoria",
+          "line": 548,
+          "complexity": 93,
+          "rank": "F"
+        },
+        {
+          "file": "scripts\\render.py",
+          "name": "findings",
+          "line": 947,
+          "complexity": 53,
+          "rank": "F"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_quality",
+          "line": 427,
+          "complexity": 44,
+          "rank": "F"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_dora",
+          "line": 1935,
+          "complexity": 38,
+          "rank": "E"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "parse_coverage",
+          "line": 560,
+          "complexity": 37,
+          "rank": "E"
+        },
+        {
+          "file": "scripts\\doctor.py",
+          "name": "main",
+          "line": 92,
+          "complexity": 34,
+          "rank": "E"
+        },
+        {
+          "file": "scripts\\render.py",
+          "name": "build_signals",
+          "line": 1175,
+          "complexity": 30,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "module_candidates",
+          "line": 353,
+          "complexity": 27,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_django",
+          "line": 805,
+          "complexity": 26,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_code",
+          "line": 212,
+          "complexity": 24,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_db",
+          "line": 1085,
+          "complexity": 23,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "_deps_desatualizadas",
+          "line": 1628,
+          "complexity": 22,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "_observabilidade_declarada",
+          "line": 1724,
+          "complexity": 22,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "hotspots",
+          "line": 968,
+          "complexity": 21,
+          "rank": "D"
+        },
+        {
+          "file": "scripts\\collect.py",
+          "name": "collect_infra",
+          "line": 1162,
+          "complexity": 20,
+          "rank": "C"
+        }
+      ],
+      "metodo": "radon"
+    }
+  },
+  "tests": {
+    "coverage_pct": null,
+    "by_app": [],
+    "test_count": null,
+    "duration_s": null,
+    "slowest": [],
+    "source": null,
+    "coverage_age_days": null
+  },
+  "django": {
+    "pending_migrations": null,
+    "deploy_issues": null,
+    "apps": null,
+    "models": null,
+    "version": null,
+    "settings_module": null,
+    "other_issues": null,
+    "nao_medido": {
+      "pending_migrations": "projeto sem manage.py na raiz",
+      "deploy_issues": "projeto sem manage.py na raiz",
+      "other_issues": "projeto sem manage.py na raiz"
+    }
+  },
+  "git": {
+    "branch": "main",
+    "commit": "cb5c9b1",
+    "commits_30d": 42,
+    "commits_90d": 42,
+    "authors_30d": [
+      {
+        "author": "Wilkerson Carlos",
+        "commits": 42
+      }
+    ],
+    "hotspots": [
+      {
+        "file": "scripts/collect.py",
+        "churn": 20,
+        "complexity": 432,
+        "loc": 1899,
+        "score": 8640,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/render.py",
+        "churn": 21,
+        "complexity": 288,
+        "loc": 1431,
+        "score": 6048,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_render_hostil.py",
+        "churn": 12,
+        "complexity": 80,
+        "loc": 1250,
+        "score": 960,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_nao_medido.py",
+        "churn": 13,
+        "complexity": 37,
+        "loc": 981,
+        "score": 481,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/doctor.py",
+        "churn": 4,
+        "complexity": 51,
+        "loc": 181,
+        "score": 204,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_faixa_incerteza.py",
+        "churn": 8,
+        "complexity": 14,
+        "loc": 234,
+        "score": 112,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_caminhos.py",
+        "churn": 3,
+        "complexity": 12,
+        "loc": 96,
+        "score": 36,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_redacao.py",
+        "churn": 3,
+        "complexity": 5,
+        "loc": 269,
+        "score": 15,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/test_docs.py",
+        "churn": 1,
+        "complexity": 4,
+        "loc": 56,
+        "score": 4,
+        "metodo": "heuristica"
+      },
+      {
+        "file": "scripts/tests/_fake_repo.py",
+        "churn": 1,
+        "complexity": 4,
+        "loc": 41,
+        "score": 4,
+        "metodo": "heuristica"
+      }
+    ],
+    "age_days": 0
+  },
+  "ci": {
+    "runs_analyzed": 0,
+    "success_rate": null,
+    "cancelados": 0,
+    "cancelados_com_deploy_ok": [],
+    "avg_duration_s": null,
+    "max_duration_s": null,
+    "recent": []
+  },
+  "governance": {
+    "docs": {
+      "readme": "README.md",
+      "licenca": "LICENSE",
+      "contributing": null,
+      "changelog": null,
+      "security": null,
+      "instrucoes_agente": null,
+      "adr": null,
+      "runbooks": null,
+      "docs_dir": "docs"
+    },
+    "gitignore": {
+      "existe": true,
+      "ignora_env": false
+    },
+    "dependabot": false,
+    "pre_commit": false,
+    "editorconfig": false,
+    "containerizado": false,
+    "workflows": {
+      "count": 0,
+      "sem_pin": [],
+      "sem_permissions": [],
+      "permissions_no_job": [],
+      "arquivos": []
+    },
+    "branch_protection": {
+      "disponivel": true,
+      "repo": "Ruch-Digital/ruch-x",
+      "branch": "main",
+      "visibility": "PUBLIC",
+      "protegido": false,
+      "exige_review": null,
+      "exige_checks": null
+    },
+    "segredos_commitados": [],
+    "dependencias": {
+      "ferramenta": null,
+      "total": null,
+      "desatualizadas": null,
+      "exemplos": [],
+      "nao_medido": {
+        "desatualizadas": "nenhum manifesto de dependências reconhecido (requirements.txt, pyproject.toml ou package.json com npm)"
+      }
+    },
+    "observabilidade": {
+      "stack": [],
+      "alertas": 0,
+      "arquivos_de_regra": [],
+      "truncado": false
+    }
+  },
+  "dora": {
+    "workflows_de_deploy": [],
+    "branch": "main",
+    "deploys_analisados": 0,
+    "janela_dias": null,
+    "deploys_por_semana": null,
+    "lead_time_p50_h": null,
+    "change_failure_rate": null,
+    "mttr_h": null,
+    "ultimo_deploy": null,
+    "reclassificacao": {
+      "vermelhos_checados": 0,
+      "deploy_ok_apesar_do_run": 0,
+      "sem_job_de_deploy": 0,
+      "sem_resposta": 0,
+      "acima_do_teto": 0
+    }
+  }
+}
