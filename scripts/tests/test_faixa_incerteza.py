@@ -213,7 +213,15 @@ class TestCardComFaixa(unittest.TestCase):
         html = render.build_veredito(_snap_confiabilidade("timeout"),
                                      [_snap_confiabilidade("timeout")])
         self.assertIn("B–A", html)
-        self.assertIn('class="eixo nota-B"', html, "a cor ancora na ponta pessimista")
+        # `class="eixo nota-B"` cru varre as 5 cartas: neste fixture o eixo
+        # Segurança tambem tem letra_max "B" (D->B), entao um mutante que
+        # trocasse `x["letra"]` por `x["letra_max"]` na classe do card
+        # (render.py, montagem de `cards`) sobreviveria escondido atras da
+        # carta errada. Isola a abertura do card de Confiabilidade pelo
+        # titulo (`<h3>Confiabilidade`) antes de checar a classe dela.
+        tag_confiabilidade = html.split('<h3>Confiabilidade')[0].rsplit('<div class="eixo ', 1)[1]
+        self.assertTrue(tag_confiabilidade.startswith('nota-B"'),
+                         "a cor ancora na ponta pessimista")
         self.assertIn("o ambiente da coleta limitou a medição", html)
 
     def test_card_pleno_identico_ao_de_hoje(self):
