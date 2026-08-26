@@ -25,8 +25,13 @@ import collect
 import render
 
 RAIZ = Path(__file__).resolve().parents[2]
-ARQUIVOS_DE_TESTE = ("test_caminhos.py", "test_docs.py", "test_nao_medido.py",
-                     "test_redacao.py", "test_render_hostil.py")
+# Descoberto da PASTA, nao escrito a mao. A lista fixa que morava aqui tinha
+# ficado para tras: `test_faixa_incerteza.py` existia e nao estava nela, entao
+# os testes daquele arquivo nunca entraram na conta que a doc declara — um
+# arquivo novo escapava do guard justamente por ser novo, que e quando o guard
+# serviria. Derivar da pasta faz o guard se manter sozinho.
+ARQUIVOS_DE_TESTE = tuple(sorted(
+    p.name for p in Path(__file__).resolve().parent.glob("test_*.py")))
 
 
 def contagem_real():

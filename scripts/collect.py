@@ -321,6 +321,30 @@ SOURCE_EXTS = {
 BRANCH_WORDS = r"\b(if|else\s+if|elif|for|while|case|catch|except|switch|&&|\|\||\?\?)\b"
 
 
+def isolar_sys_path(interpretador=None):
+    """Flag que tira o repositorio AUDITADO do `sys.path` do interpretador.
+
+    Sem isso, um arquivo `radon.py` na raiz do projeto medido e importado como
+    `__main__` e roda na maquina de quem audita — o repositorio auditado nao e
+    confiavel por definicao (ver docs/security.md).
+
+    `-P` faz exatamente isso, mas so existe a partir do Python 3.11. Rodando em
+    3.9/3.10 ele nao e "ignorado": o interpretador aborta com
+    `Unknown option: -P` e o texto do erro vazava para o painel como motivo do
+    "nao auditado" (visto em producao: "nao auditado: Try `python -h' for more
+    information."). Ou seja, a versao velha perdia a medicao E mentia o motivo.
+
+    `-I` (isolado, desde 3.4) cobre o mesmo caso e mais: alem do cwd, ignora
+    PYTHONPATH e o site-packages do usuario. E mais restritivo do que se
+    precisa aqui — se o radon so existir no site do usuario, ele deixa de ser
+    encontrado —, mas o coletor ja trata "radon ausente" como nao medido, com
+    motivo honesto. Perder a medicao dizendo a verdade e melhor que executar
+    codigo do repositorio auditado.
+    """
+    proprio = interpretador in (None, sys.executable)
+    return ["-P"] if proprio and sys.version_info >= (3, 11) else ["-I"]
+
+
 def radon_ignore():
     """Lista de diretorios pro `--ignore` do radon.
 
@@ -484,11 +508,9 @@ def collect_quality(root, cfg):
 
     # radon: complexidade ciclomatica por funcao (do PROJETO, nao das libs —
     # ver radon_ignore()).
-    # -P: sem o diretorio do repositorio auditado no sys.path. Sem isso, um
-    # arquivo `radon.py` na raiz do projeto medido roda como __main__ na
-    # maquina de quem audita.
-    rc, so, se = run([sys.executable, "-P", "-m", "radon", "cc", "-j", "-s",
-                     "--ignore", radon_ignore(), "."], cwd=root)
+    rc, so, se = run([sys.executable] + isolar_sys_path()
+                     + ["-m", "radon", "cc", "-j", "-s",
+                        "--ignore", radon_ignore(), "."], cwd=root)
     medido = False
     if rc == 0 and so.strip():
         try:
@@ -669,7 +691,7 @@ def collect_tests(root, cfg):
         # __main__ na maquina de quem audita (provado). Modulo instalado do
         # proprio projeto continua importando: o pytest insere o rootdir no
         # sys.path pelo mecanismo dele, nao pelo cwd do interpretador.
-        rc, so, se = run([sys.executable, "-P", "-m", "pytest", *args], cwd=root,
+        rc, so, se = run([sys.executable] + isolar_sys_path() + ["-m", "pytest", *args], cwd=root,
                          timeout=cfg.get("test_timeout", 900))
         out["source"] = "pytest"
         m = re.search(r"(\d+) passed", so)
@@ -987,7 +1009,7 @@ def hotspots(root, cfg):
 
     # complexidade por arquivo via radon (soma dos blocos)
     per_file = {}
-    rc, so, _ = run([sys.executable, "-P", "-m", "radon", "cc", "-j",
+    rc, so, _ = run([sys.executable] + isolar_sys_path() + ["-m", "radon", "cc", "-j",
                      "--ignore", radon_ignore(), "."], cwd=root)
     if rc == 0 and so.strip():
         try:
@@ -1631,12 +1653,12 @@ def _deps_desatualizadas(root, cfg):
     out = {"ferramenta": None, "total": None, "desatualizadas": None, "exemplos": []}
     py = str(caminho_contido(root, cfg.get("python")) or sys.executable)
     if (Path(root) / "requirements.txt").exists() or (Path(root) / "pyproject.toml").exists():
-        rc, so, _ = run([py, "-P", "-m", "pip", "list", "--outdated", "--format", "json"],
+        rc, so, _ = run([py] + isolar_sys_path(py) + ["-m", "pip", "list", "--outdated", "--format", "json"],
                         cwd=root, timeout=180)
         if rc == 0 and so.strip():
             try:
                 itens = json.loads(so)
-                rc2, so2, se2 = run([py, "-P", "-m", "pip", "list", "--format", "json"],
+                rc2, so2, se2 = run([py] + isolar_sys_path(py) + ["-m", "pip", "list", "--format", "json"],
                                     cwd=root, timeout=120)
                 total = len(json.loads(so2)) if rc2 == 0 and so2.strip() else None
                 out.update({
@@ -1778,6 +1800,25 @@ def _observabilidade_declarada(root):
             "arquivos_de_regra": sorted(arquivos)[:20], "truncado": truncado}
 
 
+def _tem_arquivo_runbook(root):
+    """Caminho do primeiro .md que se comporta como runbook, ou None.
+
+    Casa pelo NOME (`runbook`, `deploy`, `operacao`, `incidente`, `oncall`)
+    em `docs/` e na raiz, sem descer a arvore inteira — um `deploy.md` dentro
+    de `node_modules` nao e runbook de ninguem.
+    """
+    padroes = ("runbook", "deploy", "operacao", "operação", "incidente",
+               "oncall", "on-call")
+    for pasta in ("docs", ""):
+        base = root / pasta if pasta else root
+        if not base.is_dir():
+            continue
+        for arq in sorted(base.glob("*.md")):
+            if any(pad in arq.name.lower() for pad in padroes):
+                return str(arq.relative_to(root))
+    return None
+
+
 def collect_governance(root, cfg):
     """Governanca: docs, protecao de branch, supply chain, segredo commitado.
 
@@ -1797,7 +1838,16 @@ def collect_governance(root, cfg):
         return None
 
     docs["adr"] = _tem_dir("docs/adr", "docs/decisions", "adr", "docs/decisoes")
-    docs["runbooks"] = _tem_dir("docs/runbooks", "runbooks", "docs/deploy/runbooks")
+    # Runbook nem sempre mora numa PASTA chamada runbooks. Projeto pequeno
+    # costuma ter um arquivo so — `docs/deploy-easypanel.md`, `RUNBOOK.md` —
+    # e o criterio existe pra saber se o passo a passo do incidente esta
+    # escrito, nao pra cobrar a arvore de diretorios. Achado em auditoria
+    # real (2026-08-26): projeto com dois runbooks completos em docs/ saiu
+    # como "sem runbooks", e a linha P1 mandava escrever o que ja existia —
+    # falso negativo derruba a confianca no relatorio tanto quanto falso
+    # positivo.
+    docs["runbooks"] = (_tem_dir("docs/runbooks", "runbooks", "docs/deploy/runbooks")
+                        or _tem_arquivo_runbook(root))
     docs["docs_dir"] = _tem_dir("docs", "documentation")
 
     gitignore = root / ".gitignore"
