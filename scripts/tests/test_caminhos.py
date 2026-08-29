@@ -101,8 +101,14 @@ class TestFlagPFechaSysPath(unittest.TestCase):
             modulo = cmd[idx + 1]
             if modulo in ("radon", "pip", "pytest"):
                 modulos_vistos.add(modulo)
-                self.assertIn("-P", cmd[:idx],
-                              f"falta -P antes de -m {modulo}: {cmd}")
+                # A propriedade e "o repositorio auditado nao entra no
+                # sys.path", nao "o flag chama -P". Sao dois os flags que
+                # entregam isso, e qual deles aparece depende da versao do
+                # interpretador (ver isolar_sys_path): afirmar o flag fazia
+                # o teste passar em 3.11 e o coletor quebrar em 3.9.
+                self.assertTrue(
+                    {"-P", "-I"} & set(cmd[:idx]),
+                    f"falta isolamento de sys.path antes de -m {modulo}: {cmd}")
         # Sem isto, remover a chamada de collect_tests() acima faria o
         # teste continuar OK mesmo que o guard do pytest tivesse sumido.
         self.assertEqual(modulos_vistos, {"radon", "pip", "pytest"})
@@ -112,6 +118,29 @@ class TestFlagPFechaSysPath(unittest.TestCase):
         self.assertTrue(chamadas_manage, "nenhuma chamada ao manage.py foi capturada")
         for cmd in chamadas_manage:
             self.assertNotIn("-P", cmd)
+            self.assertNotIn("-I", cmd)
+
+
+class TestIsolamentoPorVersaoDoPython(unittest.TestCase):
+    """`-P` so existe no 3.11+, e o 3.9 ainda e o python de sistema no macOS.
+
+    Regressao real (2026-08-26): rodando em 3.9, o interpretador abortava com
+    `Unknown option: -P` e o texto do erro virava o motivo do "nao auditado"
+    no painel — o relatorio perdia a medicao E explicava errado.
+    """
+
+    def test_python_novo_usa_P_e_python_velho_usa_I(self):
+        with mock.patch.object(collect.sys, "version_info", (3, 11, 0)):
+            self.assertEqual(collect.isolar_sys_path(), ["-P"])
+        with mock.patch.object(collect.sys, "version_info", (3, 9, 6)):
+            self.assertEqual(collect.isolar_sys_path(), ["-I"])
+
+    def test_interpretador_de_outro_projeto_nunca_recebe_P(self):
+        """A versao de `sys` e a NOSSA; o python do projeto auditado pode ser
+        qualquer uma. `-I` funciona desde o 3.4, entao e o unico seguro ali."""
+        with mock.patch.object(collect.sys, "version_info", (3, 12, 0)):
+            self.assertEqual(collect.isolar_sys_path("/venv/do/projeto/bin/python"),
+                             ["-I"])
 
 
 class TestRelFalaALinguaDoGit(unittest.TestCase):

@@ -606,24 +606,55 @@ def auditoria(snap):
     # `deploys_analisados` decide o 3o estado do mttr (ver comentario no item
     # abaixo): falta desse dado e ambiente, entao NAO_MEDIDO — nunca "nada a
     # auditar" de graca so porque o snapshot e anterior ao campo.
+    # PROJETO QUE NAO ENTREGA PELO CI NAO TEM DORA PRA MEDIR.
+    #
+    # `workflows_de_deploy: []` significa que o coletor RODOU e nao achou
+    # workflow de deploy — o projeto publica por outro caminho (botao no
+    # Easypanel/Coolify, deploy manual, git push no servidor). Isso e "nada a
+    # auditar" pela regra da propria skill: o projeto genuinamente nao tem
+    # aquilo, entao os criterios saem da nota em vez de entrarem na faixa.
+    #
+    # Tratar como NAO_MEDIDO (o que acontecia antes) punia duas vezes: o eixo
+    # inteiro virava faixa com pior caso F, e o plano ganhava quatro linhas P2
+    # mandando "restaurar a medicao (subir o servico, instalar a ferramenta,
+    # autenticar o gh)" — conselho que nao resolve, porque nao falta ambiente:
+    # falta deploy no CI. Achado em auditoria real (2026-08-26).
+    #
+    # `None` (coletor nao rodou) continua sendo faixa: ai o ambiente faltou
+    # mesmo, e nao afirmar vale mais que afirmar errado.
+    wf_deploy = _seguro(dig(snap, "dora", "workflows_de_deploy"), list)
+    sem_deploy_no_ci = wf_deploy is not None and not wf_deploy
+    SEM_CI = " (deploy não passa pelo CI — nada a auditar)"
+
+    def _dora(valor, nivel_ok, campo):
+        """Os tres estados de um criterio DORA, na ordem que importa."""
+        if valor is not None:
+            return nivel_ok
+        return None if sem_deploy_no_ci else NAO_MEDIDO
+
+    def _sufixo_dora(valor, campo):
+        if valor is not None:
+            return ""
+        return SEM_CI if sem_deploy_no_ci else _nao_auditado(snap, "dora", campo)
+
     analisados_mttr = _seguro(dig(snap, "dora", "deploys_analisados"), int)
     mttr_ok = (None if mttr is None and cfr == 0 and analisados_mttr
-               else NAO_MEDIDO if mttr is None
+               else _dora(mttr, n_mttr in bom, "mttr_h") if mttr is None
                else n_mttr in bom)
     eixo("Entrega", [
-        (3, NAO_MEDIDO if freq is None else n_freq in bom,
+        (3, _dora(freq, n_freq in bom, "deploys_por_semana"),
          f"frequência de deploy ({_valor(freq, '/semana')})"
-         + (_nao_auditado(snap, "dora", "deploys_por_semana") if freq is None else ""), "P2",
+         + _sufixo_dora(freq, "deploys_por_semana"), "P2",
          f"Deploy {freq}/semana — abaixo do patamar de time de alta performance (1+/semana).",
          "Encurtar o ciclo: integrar na main com mais frequência e automatizar o caminho até produção."),
-        (3, NAO_MEDIDO if lead is None else n_lead in bom,
+        (3, _dora(lead, n_lead in bom, "lead_time_p50_h"),
          f"lead time p50 ({_valor(lead, 'h')})"
-         + (_nao_auditado(snap, "dora", "lead_time_p50_h") if lead is None else ""), "P1",
+         + _sufixo_dora(lead, "lead_time_p50_h"), "P1",
          f"Lead time de {lead}h entre commit e produção.",
          "Reduzir fila e etapas manuais entre merge e deploy."),
-        (3, NAO_MEDIDO if cfr is None else n_cfr in bom,
+        (3, _dora(cfr, n_cfr in bom, "change_failure_rate"),
          f"taxa de falha ({_valor(cfr, '%')})"
-         + (_nao_auditado(snap, "dora", "change_failure_rate") if cfr is None else ""), "P1",
+         + _sufixo_dora(cfr, "change_failure_rate"), "P1",
          f"{cfr}% das mudanças que chegam na branch de produção falham no pipeline.",
          "Gatear o merge com a suíte e rodar o teste do módulo tocado antes do push."),
         # Dois motivos diferentes produzem `mttr_h: None` — o coletor nao
@@ -633,7 +664,7 @@ def auditoria(snap):
         # haver falha na janela e "nada a auditar" de verdade.
         (2, mttr_ok,
          f"tempo de recuperação ({_valor(mttr, 'h')})"
-         + ((_nao_auditado(snap, "dora", "mttr_h")
+         + ((_sufixo_dora(mttr, "mttr_h")
              or _motivo_do_mttr_vazio(snap, cfr)) if mttr is None else ""), "P1",
          f"Leva {mttr}h em média pra recuperar de uma falha de deploy.",
          "Rollback documentado e imagem anterior sempre disponível encurtam isso pra minutos."),
