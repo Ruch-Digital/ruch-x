@@ -114,5 +114,46 @@ class TestFlagPFechaSysPath(unittest.TestCase):
             self.assertNotIn("-P", cmd)
 
 
+class TestRelFalaALinguaDoGit(unittest.TestCase):
+    """hotspots() cruza DOIS produtores de caminho: o churn do `git log
+    --name-only` (separador "/" em qualquer plataforma) e o radon via
+    rel() (str(Path) — "\\" no Windows). No Win o per_file.get(path)
+    nunca casava: todo .py caia na heuristica e o painel declarava "nao
+    auditado: sem radon" com o radon rodando (achado 2026-08-29, coleta
+    real do ion no Win11). A propriedade: rel() devolve separador "/"
+    em qualquer plataforma — a lingua do git, que e quem produz as
+    chaves com que o resto do snapshot cruza."""
+
+    def test_rel_devolve_barra_posix_em_qualquer_plataforma(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_repo(tmp, **{"apps/web/views.py": "x = 1\n"})
+            nativo = str(Path(root) / "apps" / "web" / "views.py")
+            self.assertEqual(collect.rel(nativo, root), "apps/web/views.py")
+
+    def test_hotspot_py_sai_radon_mesmo_com_separador_nativo(self):
+        """O radon devolve caminho no separador NATIVO do SO; o churn vem
+        do git com "/". Arquivo .py medido pelo radon tem que sair
+        metodo="radon" nas duas plataformas — cair na heuristica aqui e
+        exatamente o falso-negativo do achado."""
+        import json as _json
+        import os
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[0] == "git":
+                return 0, "apps/web/views.py\n", ""
+            if "radon" in cmd:
+                chave = os.path.join(str(fake_root), "apps", "web", "views.py")
+                return 0, _json.dumps({chave: [{"complexity": 7}]}), ""
+            return 0, "", ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_root = fake_repo(tmp, **{"apps/web/views.py": "x = 1\n"})
+            with mock.patch.object(collect, "run", side_effect=fake_run):
+                rows = collect.hotspots(fake_root, {})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["metodo"], "radon")
+        self.assertEqual(rows[0]["complexity"], 7)
+
+
 if __name__ == "__main__":
     unittest.main()

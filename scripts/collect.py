@@ -534,8 +534,13 @@ def collect_quality(root, cfg):
 
 
 def rel(path, root):
+    # as_posix(): o snapshot inteiro fala a lingua do git (separador "/").
+    # No Windows, str(Path) devolve "\\" e a chave de per_file em hotspots()
+    # nunca casava com o churn do `git log --name-only` — todo .py caia na
+    # heuristica e o painel dizia "nao auditado: sem radon" com o radon
+    # rodando (achado 2026-08-29, coleta real do ion no Win11).
     try:
-        return str(Path(path).resolve().relative_to(Path(root).resolve()))
+        return Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
     except (ValueError, OSError):
         return str(path)
 

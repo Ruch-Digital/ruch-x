@@ -160,11 +160,11 @@ accumulates over time.
 python3 -m unittest discover -s scripts/tests -t scripts/tests
 ```
 
-214 tests, standard library only, no project dependencies:
+216 tests, standard library only, no project dependencies:
 
 | File | Tests | What it protects |
 |---|---|---|
-| `test_caminhos.py` | 6 | path containment |
+| `test_caminhos.py` | 8 | path containment, and paths speaking git's language ("/") on every platform |
 | `test_docs.py` | 5 | the documentation matching the code |
 | `test_nao_medido.py` | 67 | the `None`/`nao_medido` contract |
 | `test_redacao.py` | 37 | redaction of the snapshot |
